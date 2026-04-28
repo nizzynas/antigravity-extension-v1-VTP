@@ -15,6 +15,8 @@
   const statusText       = document.getElementById('status-text');
   const contextWorkspace = document.getElementById('context-workspace');
   const contextConv      = document.getElementById('context-conv');
+  const contextPin       = document.getElementById('context-pin');
+  const btnContext       = document.getElementById('btn-context');
   const transcriptBox    = document.getElementById('transcript-box');
   const btnRecord        = document.getElementById('btn-record');
   const btnPause         = document.getElementById('btn-pause');
@@ -211,6 +213,15 @@
       case 'contextUpdate':
         contextWorkspace.textContent = msg.workspaceName || '—';
         contextConv.textContent      = msg.conversationTitle || '—';
+        if (msg.pinned) {
+          contextPin.classList.remove('hidden');
+          contextPin.textContent = msg.extrasCount ? `+${msg.extrasCount}` : '📌';
+          btnContext.title = `Extra context active — click to manage`;
+        } else {
+          contextPin.classList.add('hidden');
+          contextPin.textContent = '📌';
+          btnContext.title = 'Click to add extra conversation context';
+        }
         break;
 
       case 'recordingStarted':
@@ -334,6 +345,7 @@
 
   btnApiKey.addEventListener('click', () => post({ type: 'openSettings' }));
   btnInfo.addEventListener('click',   () => post({ type: 'showInfo' }));
+  btnContext.addEventListener('click', () => post({ type: 'selectContext' }));
 
   btnApprove.addEventListener('click', () => post({ type: 'enhancementDecision', action: 'approve' }));
   btnReject.addEventListener('click',  () => post({ type: 'enhancementDecision', action: 'reject' }));

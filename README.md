@@ -18,6 +18,7 @@ VTP turns your voice into a full AI coding workflow. Click once to start recordi
 - ⏸ **Smart auto-pause** — silence detection auto-pauses after you stop talking, then restarts automatically for continuous listening
 - ⚡ **Full voice control** — pause, resume, send, clear, enhance — all without touching the mouse
 - 📎 **Workspace context** — automatically reads your open files, active conversation, and workspace name for smarter prompts
+- 🧩 **Multi-memory context** — layer additional past Antigravity conversations on top of the auto-detected primary. Add or remove extras at any time; they feed into enhancements as read-only supplementary context.
 - 🔑 **Secure key storage** — Gemini API key stored in VS Code SecretStorage, never in code or config files
 
 ---
@@ -62,7 +63,29 @@ Click the microphone button and start dictating. Audio processes in 3-second chu
 
 ---
 
+## 🧩 Memory Context — Multi-Conversation Selection
+
+VTP automatically detects your **current Antigravity conversation** (the most recently modified chat) and feeds it into every enhancement as the primary context.
+
+If you need to pull in knowledge from *other* past chats — a previous session on the same project, a different workspace's conversation — click the **📂 context card** at the top of the panel.
+
+### How it works
+
+| What | How |
+|---|---|
+| **Primary context** | Auto-detected (most recently modified conversation). Always active. |
+| **Extra context** | Past Antigravity conversations you manually check in the picker. |
+| **Adding extras** | Click 📂 → tick checkboxes → press Enter. Multiple selections OK. |
+| **Removing extras** | Click 📂 again → untick → press Enter. |
+| **Effect** | Extra messages are appended (read-only) to the primary context when Gemini elaborates your prompt. |
+| **Badge** | A purple `+N` pill appears on the card when extras are active. |
+
+Extras are **read-only** — they inform the elaboration but cannot be modified or replace the primary auto-detected chat.
+
+---
+
 ## 🖥 Platform Support
+
 
 | Platform | Status |
 |---|---|

@@ -4,6 +4,18 @@ All notable changes to VTP — Voice to Prompt are documented here.
 
 ---
 
+## [0.1.16] — 2026-04-28
+### Added
+- **Multi-memory context picker** — click the 📂 context card in the panel to open a multi-select list of all past Antigravity conversations. Check any number of past chats to layer them as supplementary read-only context on top of the auto-detected primary.
+- **Additive extra context** — extras are appended to the primary conversation's messages when Gemini elaborates a prompt. They cannot be edited, just added or removed — keeping the primary context clean.
+- **`+N` badge** — when extra conversations are active, a small purple pill showing the count (e.g. `+2`) appears on the context card so you always know how many memory layers are active.
+- **Extras persist per session** — the extra stack stays loaded for the lifetime of the panel; clicking the card again opens the picker with the same selections pre-checked so you can add/remove incrementally.
+
+### Fixed
+- **Primary context now uses recency** — `findBestMatch()` now selects the most recently modified conversation log (= the chat you're currently in Antigravity) instead of a scoring heuristic that caused all workspace chats to rank identically and show stale context.
+
+---
+
 ## [0.1.15] — 2026-04-28
 ### Fixed
 - **Trigger recovery on timeout** — if a chunk's Gemini call times out (10s), the accumulated `interimTranscript` is immediately scanned for send/enhance triggers so commands aren't silently dropped when the API is slow on that specific chunk

@@ -54,6 +54,8 @@ export type PanelMessage =
   | { type: 'showInfo' }
   | { type: 'setVadMode'; vadMode: boolean }
   | { type: 'log'; message: string }
+  /** User clicked the context card — open the conversation picker */
+  | { type: 'selectContext' }
   /** Enhancement review decision: approve keeps enhanced, reject restores original, regenerate re-elaborates */
   | { type: 'enhancementDecision'; action: 'approve' | 'reject' | 'regenerate' };
 
@@ -68,7 +70,7 @@ export type ExtensionMessage =
   | { type: 'enhancedRejected'; original: string }             // panel: restore original text
   | { type: 'injected' }
   | { type: 'error'; message: string }
-  | { type: 'contextUpdate'; workspaceName: string; conversationTitle: string }
+  | { type: 'contextUpdate'; workspaceName: string; conversationTitle: string; pinned?: boolean; extrasCount?: number }
   | { type: 'settings'; vadMode: boolean }
   | { type: 'transcriptResult'; text: string }
   | { type: 'apiKeyStatus'; hasKey: boolean }

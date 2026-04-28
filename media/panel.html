@@ -29,14 +29,15 @@
       </div>
     </header>
 
-    <!-- Context badge -->
-    <div class="context-card">
+    <!-- Context badge — click to add extra conversation context -->
+    <button id="btn-context" class="context-card" title="Click to add extra conversation context">
       <span class="context-icon">📂</span>
       <div class="context-info">
         <span id="context-workspace" class="context-workspace">Detecting...</span>
         <span id="context-conv" class="context-conv">—</span>
       </div>
-    </div>
+      <span id="context-pin" class="context-pin hidden" title="Extra context active">📌</span>
+    </button>
 
     <!-- Status -->
     <div id="status-bar" class="status-bar status-idle">

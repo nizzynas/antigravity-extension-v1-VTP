@@ -7,6 +7,7 @@ import {
   WorkspaceContext,
   MatchedConversation,
 } from '../types';
+import { ScoredConversation } from '../context/ConversationMatcher';
 import { SecretManager } from '../config/SecretManager';
 import { WorkspaceContextCollector } from '../context/WorkspaceContextCollector';
 import { ConversationMatcher } from '../context/ConversationMatcher';
@@ -25,6 +26,8 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private promptBuffer = '';
   private cachedContext: WorkspaceContext | null = null;
   private cachedConversation: MatchedConversation | null = null;
+  /** Extra conversations the user manually added as supplementary read-only context. */
+  private _extraConversations: ScoredConversation[] = [];
 
   private intentProcessor: IntentProcessor | null = null;
   private commandExecutor: CommandExecutor | null = null;
@@ -113,6 +116,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         break;
       case 'openSettings':        await this.handleOpenSettings(); break;
       case 'showInfo':            await this.showApiKeyInfo(); break;
+      case 'selectContext':       await this.openConversationPicker(); break;
       case 'log':
         this.log.appendLine(msg.message);
         break;
@@ -1067,10 +1071,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this._originalBufferBeforeEnhance = this.promptBuffer;
 
     try {
-      const [context, conversation] = await Promise.all([
+      const [context] = await Promise.all([
         this.contextCollector.collect(),
-        this.cachedConversation ?? this.conversationMatcher.findBestMatch(),
       ]);
+      const conversation = this.getEffectiveConversation();
 
       const elaborated = await this.withRetry(() =>
         this.promptElaborator!.elaborate(this.promptBuffer, context, conversation),
@@ -1198,6 +1202,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     return msg;
   }
 
+  /**
+   * Auto-detects the primary context (most recently modified = current chat)
+   * and notifies the panel. Does NOT overwrite if already loaded.
+   */
   private refreshContext(): void {
     Promise.all([
       this.contextCollector.collect(),
@@ -1205,11 +1213,117 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     ]).then(([context, conversation]) => {
       this.cachedContext      = context;
       this.cachedConversation = conversation;
-      const title = conversation?.title ?? 'none';
+      const title      = conversation?.title ?? 'none';
       const shortTitle = title.length > 60 ? title.slice(0, 57) + '...' : title;
-      this.log.appendLine(`[VTP] Context ready — workspace="${context.workspaceName}", conv="${shortTitle}"`);
-      this.send({ type: 'contextUpdate', workspaceName: context.workspaceName, conversationTitle: shortTitle });
+      const extrasCount = this._extraConversations.length;
+      this.log.appendLine(`[VTP] Context ready — workspace="${context.workspaceName}", conv="${shortTitle}", extras=${extrasCount}`);
+      this.send({
+        type: 'contextUpdate',
+        workspaceName:     context.workspaceName,
+        conversationTitle: shortTitle,
+        pinned:            extrasCount > 0,   // show pin badge when extras are active
+      });
     }).catch((e) => this.log.appendLine(`[VTP] Context error: ${e}`));
+  }
+
+  /**
+   * Returns the effective conversation context: primary + any extras the user added.
+   * The extras are appended as read-only supplementary messages.
+   */
+  private getEffectiveConversation(): MatchedConversation | null {
+    const primary = this.cachedConversation;
+    if (!this._extraConversations.length) return primary;
+
+    // Merge primary messages + extras messages (extras appended, not replacing)
+    const primaryMsgs = primary?.messages ?? [];
+    const extraMsgs   = this._extraConversations.flatMap((c) => c.messages);
+    const depth       = vscode.workspace.getConfiguration('vtp').get<number>('contextDepth', 20);
+
+    return {
+      id:       (primary?.id ?? 'primary') + '+' + this._extraConversations.map((c) => c.id).join('+'),
+      title:    primary?.title ?? 'none',
+      messages: [...primaryMsgs, ...extraMsgs].slice(-depth * 2), // give room for extras
+      score:    primary?.score ?? 0,
+    };
+  }
+
+  /**
+   * Opens a VS Code QuickPick showing all past conversations.
+   * - Primary (auto) is shown at the top as read-only info.
+   * - User can toggle extras on/off by clicking (checked = added, unchecked = removed).
+   * - Extras are read-only supplementary context; they don't replace the primary.
+   */
+  private async openConversationPicker(): Promise<void> {
+    const all: ScoredConversation[] = await this.conversationMatcher.findAllMatches();
+
+    if (!all.length) {
+      vscode.window.showWarningMessage('VTP: No Antigravity conversation logs found in ~/.gemini/antigravity/brain.');
+      return;
+    }
+
+    const primaryId = this.cachedConversation?.id;
+
+    const fmt = (c: ScoredConversation): string => {
+      const d    = new Date(c.lastModified);
+      const date = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      return `${c.title.slice(0, 60)}${c.title.length > 60 ? '…' : ''}   ${date}`;
+    };
+
+    type Item = vscode.QuickPickItem & { conv?: ScoredConversation };
+
+    const items: Item[] = [
+      // Header — current primary (read-only)
+      {
+        label:       `$(eye)  Current (auto): ${this.cachedConversation?.title?.slice(0, 50) ?? 'none'}`,
+        description: 'Primary context — auto-detected, always active',
+        kind:        vscode.QuickPickItemKind.Default,
+      },
+      { label: 'Extra context — toggle to add or remove', kind: vscode.QuickPickItemKind.Separator },
+      // All other conversations (skip primary)
+      ...all
+        .filter((c) => c.id !== primaryId)
+        .map((c): Item => ({
+          label:       fmt(c),
+          description: c.preview ? `"${c.preview.slice(0, 60)}"` : '',
+          picked:      this._extraConversations.some((e) => e.id === c.id),
+          conv:        c,
+        })),
+    ];
+
+    // Multi-select QuickPick so user can add/remove multiple extras at once
+    const qp = vscode.window.createQuickPick<Item>();
+    qp.title          = 'VTP — Extra Conversation Context';
+    qp.placeholder    = 'Check conversations to add as supplementary context (read-only)';
+    qp.canSelectMany  = true;
+    qp.matchOnDescription = true;
+    qp.items          = items;
+    // Pre-check already-added extras
+    qp.selectedItems  = items.filter((i) => i.conv && this._extraConversations.some((e) => e.id === i.conv!.id));
+
+    const result = await new Promise<Item[] | undefined>((resolve) => {
+      qp.onDidAccept(() => { resolve([...qp.selectedItems]); qp.dispose(); });
+      qp.onDidHide(()   => { resolve(undefined);              qp.dispose(); });
+      qp.show();
+    });
+
+    if (result === undefined) return; // cancelled
+
+    // Update extras — only conversations (skip the header item which has no conv)
+    const newExtras = result.filter((i) => !!i.conv).map((i) => i.conv!);
+    this._extraConversations = newExtras;
+
+    const extrasCount = newExtras.length;
+    const primaryTitle = this.cachedConversation?.title ?? 'none';
+    const shortTitle   = primaryTitle.length > 60 ? primaryTitle.slice(0, 57) + '...' : primaryTitle;
+
+    this.log.appendLine(`[VTP] Extra context updated: ${extrasCount} conversation(s) added.`);
+    this.send({
+      type:              'contextUpdate',
+      workspaceName:     this.cachedContext?.workspaceName ?? '',
+      conversationTitle: shortTitle,
+      pinned:            extrasCount > 0,
+      extrasCount,
+    });
   }
 
   private ensurePipeline(apiKey: string): void {
