@@ -756,8 +756,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     // Only call Gemini when text contains an explicit VTP action trigger.
     const SEND_TRIGGER   = /\b(send it|send this|send the prompt|send this prompt|send my prompt|send now|submit this|submit the prompt)\b[.,!?\s]*$/i;
     const ACTION_TRIGGER = /\b(enhance (this|my|the) prompt|rewrite (this|my|the) prompt|improve (this|my|the) prompt|cancel( that)?|clear( that)?|open the terminal|run (the )?tests|hey vtp)\b/i;
+    const segmentCleaned = this._stripFiller(segment);
 
-    if (!SEND_TRIGGER.test(segment) && !ACTION_TRIGGER.test(segment)) {
+    if (!SEND_TRIGGER.test(segment) && !SEND_TRIGGER.test(segmentCleaned) && !ACTION_TRIGGER.test(segment)) {
       this.promptBuffer += (this.promptBuffer ? ' ' : '') + segment;
       this.send({ type: 'transcriptResult', text: this.promptBuffer });
       this.log.appendLine('[VTP] Plain dictation — added to buffer verbatim (no classification).');
@@ -864,6 +865,15 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.send({ type: 'injected' });
   }
 
+  private _stripFiller(text: string): string {
+    // Remove common filler words/greetings at the start and end of an utterance
+    // so that "hello send it hello" → "send it" and still triggers correctly.
+    return text
+      .replace(/^[\s,]*(hello|hi|hey|um|uh|okay|ok|alright|right|so|yeah|yes|well|now|please)[\s,]+/gi, '')
+      .replace(/[\s,]*(hello|hi|hey|um|uh|okay|ok|alright|right|yeah|yes)[\s,]*$/gi, '')
+      .trim();
+  }
+
   /**
    * Returns true if the text contains a voice "send" command.
    * Used for real-time detection during live chunk transcription.
@@ -871,7 +881,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private _hasSendTrigger(text: string): boolean {
     // Anchored to end-of-utterance: prevents mid-sentence matches like
     // "we'll send the prompt from here" (has words after the trigger phrase).
-    return /\b(send it|send the prompt|send this prompt|send my prompt|send this|send that|submit this|go ahead and send|ok send|okay send|go send|please send|just send|send message|send now|submit now)\b[.,!?\s]*$/i.test(text);
+    const PATTERN = /\b(send it|send the prompt|send this prompt|send my prompt|send this|send that|submit this|go ahead and send|ok send|okay send|go send|please send|just send|send message|send now|submit now)\b[.,!?\s]*$/i;
+    // Also check after stripping filler words (handles "hello send it hello")
+    if (PATTERN.test(text) || PATTERN.test(this._stripFiller(text))) { return true; }
+    // Loose fallback: "send the [single-word]" — catches Gemini mishearings of
+    // "send the prompt" (e.g. "send the front", "send the chrome", etc.)
+    return /\bsend\s+the\s+\w+[.,!?\s]*$/i.test(this._stripFiller(text));
   }
 
   /**
