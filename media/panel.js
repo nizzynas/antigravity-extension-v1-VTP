@@ -166,7 +166,7 @@
     return r;
   }
 
-  function startRecognition() {
+  async function startRecognition() {
     intentionalStop = false;
 
     if (transcriptionMode === 'ffmpeg') {
@@ -176,7 +176,21 @@
       return;
     }
 
-    // SR mode: Web Speech API handles transcription
+    // SR mode: VS Code webviews don't auto-grant mic access.
+    // getUserMedia triggers the OS permission dialog; once granted, SpeechRecognition
+    // can re-acquire the mic. We stop the stream immediately — SR takes it back.
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(t => t.stop());
+      } catch (_err) {
+        post({ type: 'micPermissionDenied' });
+        setStatus('idle', '⚠ Mic permission denied — check OS settings');
+        return;
+      }
+    }
+
+    // Web Speech API handles transcription
     recognition = buildRecognition();
     if (!recognition) {
       // No Web Speech API in this browser — fall back to FFmpeg

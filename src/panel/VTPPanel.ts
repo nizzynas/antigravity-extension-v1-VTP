@@ -125,9 +125,17 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         await this.handleEnhancementDecision(msg.action);
         break;
       case 'setTranscriptionMode': {
+        const prevMode = this.transcriptionMode;
         this.transcriptionMode = msg.mode;
         await vscode.workspace.getConfiguration('vtp').update('transcriptionMode', msg.mode, true);
         this.log.appendLine(`[VTP] Transcription mode → ${msg.mode}`);
+        // Kill FFmpeg immediately when switching away from it — prevents ghost chunks
+        // from the old session continuing to flow into processLiveChunk.
+        if (prevMode === 'ffmpeg' && this.capture.isRecording()) {
+          this.log.appendLine('[VTP] Mode switch: killing FFmpeg to prevent ghost chunks.');
+          this._cancelChunks = true;
+          this.capture.kill();
+        }
         break;
       }
       case 'openSettings':        await this.handleOpenSettings(); break;
