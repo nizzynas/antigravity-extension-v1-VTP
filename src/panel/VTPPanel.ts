@@ -42,6 +42,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private interimTranscript  = '';
   // Transcription engine: always FFmpeg + Gemini.
   private _chunkQueue: Promise<void> = Promise.resolve();
+  private _chunkQueueDepth = 0; // tracks pending chunks — high values indicate API stall
   private _sendTriggerFired  = false;
   private _restartAfterSend  = false;
   private _vadStop           = false;  // true when stop was triggered by VAD silence
@@ -190,9 +191,14 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       // ── Wire chunk callbacks ────────────────────────────────────────────────
       this.capture.onChunkReady = (chunk) => {
         if (this._cancelChunks) return;
-        this._chunkQueue = this._chunkQueue.then(
-          () => this.processLiveChunk(chunk.buffer, chunk.mimeType, sessionGen),
-        );
+        this._chunkQueueDepth++;
+        if (this._chunkQueueDepth > 3) {
+          this.log.appendLine(`[VTP] ⚠ Queue backed up (${this._chunkQueueDepth} pending) — Gemini may be slow. Live transcript will lag.`);
+        }
+        this._chunkQueue = this._chunkQueue.then(async () => {
+          this._chunkQueueDepth--;
+          await this.processLiveChunk(chunk.buffer, chunk.mimeType, sessionGen);
+        });
       };
 
       this.capture.onChunkSkipped = () => {
@@ -514,30 +520,79 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       // 2.0-flash + 1.5-flash are deprecated/removed. 2.5-flash → 2.5-flash-lite.
       const CHUNK_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
       let raw: string | null = null;
-      for (const modelName of CHUNK_MODELS) {
-        try {
-          const model = genai.getGenerativeModel({
-            model: modelName,
-            systemInstruction: sysInstruction,
-            generationConfig: { temperature: 0 }, // suppress hallucination on quiet/background audio
-          });
-          const res = await model.generateContent([
-            { inlineData: { mimeType, data: base64 } },
-            'Transcribe the audio.',
-          ]);
-          raw = res.response.text().trim();
-          break;
-        } catch (e) {
-          const s = String(e);
-          if (s.includes('503') || s.includes('500') || s.includes('404') ||
-              s.includes('overloaded') || s.includes('high demand') ||
-              s.includes('Internal error') || s.includes('Service Unavailable') ||
-              s.includes('no longer available')) {
-            continue; // try next model immediately
+
+      // Hard 6s timeout shared across ALL model attempts for this chunk.
+      // If Gemini hangs (network stall, no response), the queue must not freeze —
+      // we skip this chunk and let the next one process immediately.
+      const CHUNK_TIMEOUT_MS = 10000;
+      let chunkTimedOut = false;
+      let timeoutHandle: ReturnType<typeof setTimeout>;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          chunkTimedOut = true;
+          reject(new Error('chunk-timeout'));
+        }, CHUNK_TIMEOUT_MS);
+      });
+
+      try {
+        for (const modelName of CHUNK_MODELS) {
+          if (chunkTimedOut) break;
+          try {
+            const model = genai.getGenerativeModel({
+              model: modelName,
+              systemInstruction: sysInstruction,
+              generationConfig: { temperature: 0 },
+            });
+            const res = await Promise.race([
+              model.generateContent([
+                { inlineData: { mimeType, data: base64 } },
+                'Transcribe the audio.',
+              ]),
+              timeoutPromise,
+            ]);
+            raw = res.response.text().trim();
+            break;
+          } catch (e) {
+            const s = String(e);
+            if (s === 'Error: chunk-timeout') { throw e; } // re-throw to outer catch
+            if (s.includes('503') || s.includes('500') || s.includes('404') ||
+                s.includes('overloaded') || s.includes('high demand') ||
+                s.includes('Internal error') || s.includes('Service Unavailable') ||
+                s.includes('no longer available')) {
+              continue; // try next model immediately
+            }
+            throw e;
           }
-          throw e;
         }
+      } catch (e) {
+        clearTimeout(timeoutHandle!);
+        const s = String(e);
+        if (s.includes('chunk-timeout')) {
+          this.log.appendLine('[VTP] ⚠ Chunk timed out (10s) — skipping to unblock queue.');
+          // Recovery: even though this chunk was dropped, a prior chunk may have
+          // already placed the send/enhance trigger in interimTranscript. Fire now.
+          if (!this._sendTriggerFired && this._hasSendTrigger(this.interimTranscript)) {
+            this._sendTriggerFired = true;
+            this._restartAfterSend = true;
+            this.capture.kill();
+            this.log.appendLine('[VTP] Send trigger recovered from interimTranscript after chunk timeout.');
+            this.send({ type: 'vadAutoStop' });
+            void this.stopRecording();
+          } else if (!this._enhanceTriggerFired && !this._sendTriggerFired) {
+            const ENHANCE_LIVE = /\b(enhance\s+(this|my|the)\s+prompt|enhance\s+prompt|improve\s+(this|my|the)\s+prompt|rewrite\s+(this|my|the)\s+prompt)\b/i;
+            if (ENHANCE_LIVE.test(this.interimTranscript)) {
+              this._enhanceTriggerFired = true;
+              this.capture.kill();
+              this.log.appendLine('[VTP] Enhance trigger recovered from interimTranscript after chunk timeout.');
+              this.send({ type: 'vadAutoStop' });
+              void this.stopRecording();
+            }
+          }
+          return;
+        }
+        throw e; // rethrow real errors to outer catch
       }
+      clearTimeout(timeoutHandle!);
 
       // Re-check after async Gemini call — only bail if isPaused has been set
       // (meaning the pause action already ran from a prior chunk's queue slot).
