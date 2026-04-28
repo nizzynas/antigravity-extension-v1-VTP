@@ -37,6 +37,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private readonly capture = new AudioCapture();
 
   private ffmpegReady = false;
+  private isPaused   = false;  // true = mic stays on but only wake phrases are processed
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -77,6 +78,8 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       case 'ready':          await this.onPanelReady(); break;
       case 'startRecording': await this.startRecording(); break;
       case 'stopRecording':  await this.stopRecording(); break;
+      case 'pauseRecording': await this.pauseRecording(); break;
+      case 'resumeRecording': await this.resumeRecording(); break;
       case 'send':           await this.onSend(msg.prompt); break;
       case 'cancel':
         this.promptBuffer = '';
@@ -147,6 +150,35 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
     try {
       this.log.appendLine('[VTP] Starting FFmpeg audio capture...');
+
+      // ── Wire VAD callbacks ──────────────────────────────────────────────
+
+      // Short silence (1.5s) → route through isPaused
+      this.capture.onSilenceDetected = () => {
+        if (!this.capture.isRecording()) return;
+
+        if (this.isPaused) {
+          // In pause-monitor mode: stop, transcribe, check for wake phrase
+          this.log.appendLine('[VTP] Pause monitor: checking for wake phrase...');
+          this.checkForWakePhrase();
+        } else {
+          // Normal: auto-stop + process utterance
+          this.log.appendLine('[VTP] VAD: silence detected — auto-stopping.');
+          this.send({ type: 'vadAutoStop' });
+          this.stopRecording();
+        }
+      };
+
+      // Extended silence (8s) → auto-pause: keep mic on but enter monitor mode
+      this.capture.onExtendedSilence = () => {
+        if (this.isPaused) return; // already paused
+        if (this.capture.isRecording()) {
+          this.log.appendLine('[VTP] VAD: extended silence — auto-pausing (mic stays on).');
+          this.isPaused = true;
+          this.send({ type: 'autoPaused' });
+        }
+      };
+
       await this.capture.start();
       this.send({ type: 'recordingStarted' });
       this.log.appendLine('[VTP] Recording started.');
@@ -180,6 +212,87 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       const msg = err instanceof Error ? err.message : String(err);
       this.log.appendLine(`[VTP] Stop/transcribe error: ${msg}`);
       this.send({ type: 'error', message: `Recording error: ${msg}` });
+    }
+  }
+
+  /**
+   * Pauses recording — keeps FFmpeg alive in monitor mode.
+   * Any speech while paused is checked ONLY for wake phrases.
+   */
+  private pauseRecording(): void {
+    if (this.isPaused) {
+      this.send({ type: 'paused' });
+      return;
+    }
+    this.log.appendLine('[VTP] Pausing — mic stays on in monitor mode (buffer preserved).');
+    this.isPaused = true;
+    this.send({ type: 'paused' });
+  }
+
+  /**
+   * Resumes from pause — clears flag so next onSilenceDetected goes through
+   * the normal processing path again.
+   */
+  private async resumeRecording(): Promise<void> {
+    this.isPaused = false;
+    this.log.appendLine('[VTP] Resumed.');
+    // If FFmpeg died while paused, restart it
+    if (!this.capture.isRecording()) {
+      await this.startRecording();
+    }
+    this.send({ type: 'resumed' });
+  }
+
+  /**
+   * Called when onSilenceDetected fires while isPaused=true.
+   * Stops FFmpeg to get the audio clip, checks for a wake phrase,
+   * then restarts FFmpeg to keep monitoring.
+   */
+  private async checkForWakePhrase(): Promise<void> {
+    // Stop current recording to capture the audio snippet
+    const result = await this.capture.stop();
+
+    if (!result || !this.isPaused) {
+      // Nothing captured or already resumed manually — restart monitor
+      if (this.isPaused) await this.capture.start();
+      return;
+    }
+
+    const apiKey = await this.secretManager.getApiKey();
+    if (!apiKey) {
+      if (this.isPaused) await this.capture.start();
+      return;
+    }
+
+    try {
+      const base64 = result.buffer.toString('base64');
+      const genai  = new GoogleGenerativeAI(apiKey);
+      const model  = genai.getGenerativeModel({
+        model: 'gemini-2.5-flash',
+        systemInstruction: 'Transcribe the audio exactly as spoken. Output ONLY the spoken words. If no speech, output [SILENCE].',
+      });
+      const res  = await model.generateContent([
+        { inlineData: { mimeType: result.mimeType, data: base64 } },
+        'Transcribe the audio.',
+      ]);
+      const text = res.response.text().trim().toLowerCase();
+      this.log.appendLine(`[VTP] Wake monitor heard: "${text}"`);
+
+      if (/\b(resume|continue|start|wake up|keep going|i'm back|listen|go|activate)\b/.test(text)) {
+        // Wake phrase detected
+        this.log.appendLine('[VTP] Wake phrase matched — resuming.');
+        this.isPaused = false;
+        this.send({ type: 'resumed' });
+        await this.startRecording();
+        return;
+      }
+    } catch (err) {
+      this.log.appendLine(`[VTP] Wake monitor error: ${this.formatError(err)}`);
+    }
+
+    // No wake phrase — restart monitor loop
+    if (this.isPaused) {
+      await this.capture.start();
     }
   }
 
@@ -325,7 +438,15 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     } catch (err) {
       const msg = this.formatError(err);
       this.log.appendLine(`[VTP] Intent error: ${msg}`);
-      this.send({ type: 'error', message: msg });
+      // Save the segment as plain content so it's not lost on API errors (e.g. 503)
+      if (segment.trim()) {
+        this.promptBuffer += (this.promptBuffer ? ' ' : '') + segment.trim();
+        this.send({ type: 'transcriptResult', text: this.promptBuffer });
+        this.log.appendLine(`[VTP] Saved segment to buffer after error (${segment.length} chars).`);
+        this.send({ type: 'error', message: `Classification failed (saved to buffer): ${msg}` });
+      } else {
+        this.send({ type: 'error', message: msg });
+      }
     }
   }
 

@@ -44,10 +44,13 @@
       <span id="status-text">Ready — press Record</span>
     </div>
 
-    <!-- Record button -->
+    <!-- Record + Pause buttons -->
     <div class="record-area">
       <button id="btn-record" class="btn-record" title="Click to start / stop recording">
         <span class="mic-glyph">🎙</span>
+      </button>
+      <button id="btn-pause" class="btn-pause hidden" title="Pause — mic stays on, buffer preserved">
+        ⏸
       </button>
       <span id="record-hint" class="record-hint">Push to Talk</span>
     </div>
@@ -58,7 +61,6 @@
       <div id="transcript-box" class="transcript-box">Your speech will appear here...</div>
     </div>
 
-    <!-- Glossary -->
     <div class="card glossary-card">
       <div class="card-label">🗂 Voice Commands</div>
       <table class="glossary-table">
@@ -85,6 +87,21 @@
           <tr>
             <td><code>open the terminal</code> / <code>run tests</code></td>
             <td>IDE command — runs without touching the prompt.</td>
+          </tr>
+          <tr class="glossary-divider">
+            <td colspan="2"><strong>⏸ Pause &amp; Resume</strong></td>
+          </tr>
+          <tr>
+            <td><em>Auto-pause</em></td>
+            <td>Mic stays on but enters monitor mode after ~9s of silence.</td>
+          </tr>
+          <tr>
+            <td><code>resume</code> / <code>continue</code> / <code>I'm back</code></td>
+            <td>Voice wake — reactivates recording from pause mode.</td>
+          </tr>
+          <tr>
+            <td><em>⏸ button</em></td>
+            <td>Manual pause. Mic stays on. Click ▶ or say <code>resume</code> to continue.</td>
           </tr>
         </tbody>
       </table>

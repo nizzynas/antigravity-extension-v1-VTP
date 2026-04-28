@@ -43,15 +43,18 @@ export interface CustomCommand {
 
 /** Messages sent FROM the Webview TO the extension host */
 export type PanelMessage =
-  | { type: 'startRecording' }                                 // open system browser capture page
-  | { type: 'stopRecording' }                                  // user manually stopped
+  | { type: 'startRecording' }
+  | { type: 'stopRecording' }
+  | { type: 'pauseRecording' }                                 // kill mic, keep buffer, no process
+  | { type: 'resumeRecording' }                                // restart mic, append to buffer
   | { type: 'send'; prompt: string }
   | { type: 'cancel' }
   | { type: 'ready' }
   | { type: 'openSettings' }
   | { type: 'showInfo' }
-  | { type: 'micPermissionDenied' }                            // legacy — keep for safety
+  | { type: 'micPermissionDenied' }
   | { type: 'log'; message: string };
+
 
 /** Messages sent FROM the extension host TO the Webview */
 export type ExtensionMessage =
@@ -63,7 +66,12 @@ export type ExtensionMessage =
   | { type: 'error'; message: string }
   | { type: 'contextUpdate'; workspaceName: string; conversationTitle: string }
   | { type: 'settings'; vadMode: boolean; language: string }
-  | { type: 'transcriptResult'; text: string }                 // transcribed audio from Gemini
-  | { type: 'apiKeyStatus'; hasKey: boolean }                  // API key state for UI indicator
-  | { type: 'recordingStarted' }                               // browser capture page opened
-  | { type: 'recordingStopped' };                              // audio received, processing
+  | { type: 'transcriptResult'; text: string }
+  | { type: 'apiKeyStatus'; hasKey: boolean }
+  | { type: 'recordingStarted' }
+  | { type: 'recordingStopped' }
+  | { type: 'vadAutoStop' }
+  | { type: 'paused' }       // manual pause confirmed
+  | { type: 'resumed' }      // manual resume confirmed
+  | { type: 'autoPaused' };  // auto-pause triggered by extended silence
+
