@@ -4,6 +4,8 @@
 
 VTP is a real-time voice-to-prompt coding assistant for VS Code. Dictate your thoughts hands-free, let Gemini elaborate them into production-ready prompts, then send them directly into [Antigravity](https://antigravity.dev) — no copy-paste required.
 
+> **⚠️ Heads up:** This extension is pretty vibe-coded. After the voice pipeline was working, I started using VTP itself to build the rest of it — so there are rough edges but it works, it's useful, and it's being actively improved.
+
 ---
 
 ## ✨ Features

@@ -71,9 +71,10 @@
   "scripts": {
     "build": "webpack --mode production",
     "watch": "webpack --watch --mode development",
-    "package": "vsce package --out vtp-voice-prompt.vsix",
+    "package": "vsce package --no-dependencies --out vtp-voice-prompt-0.1.0.vsix",
     "compile": "webpack --mode production && tsc --noEmit",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "release": "npm run build && vsce package --no-dependencies --out vtp-voice-prompt.vsix && vsce publish --packagePath vtp-voice-prompt.vsix && ovsx publish vtp-voice-prompt.vsix -p %OVSX_TOKEN%"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
