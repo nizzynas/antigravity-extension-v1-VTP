@@ -28,16 +28,17 @@ export class AudioCapture {
   private _chunkIndex = 0;
   private _chunkedMode = false;
 
-  /** Resolves when the current stopChunked() call completes.
-   *  startChunked() awaits this before spawning — prevents zombie FFmpeg processes
-   *  when the caller uses fire-and-forget (void stopRecording()). */
+  /** Resolves when the current stopChunked() call completes. */
   private _stopInProgress: Promise<void> | null = null;
 
+  /** Cached device name — enumerated once per extension lifetime to avoid 5-15s delay. */
+  private static _cachedDevice: string | null = null;
+
   onSilenceDetected: (() => void) | null = null;
+  onSilenceStart:    (() => void) | null = null;   // fires when user STOPS talking (silence_start)
   onExtendedSilence: (() => void) | null = null;
   onChunkReady: ((chunk: ChunkResult) => void) | null = null;
   onChunkSkipped: (() => void) | null = null;
-  /** Fired with raw FFmpeg stderr lines — wire up to log channel for diagnostics */
   onFfmpegLog: ((line: string) => void) | null = null;
 
   static async isAvailable(): Promise<boolean> {
@@ -49,16 +50,18 @@ export class AudioCapture {
   }
 
   static async getWindowsAudioDevice(): Promise<string> {
+    if (AudioCapture._cachedDevice) return AudioCapture._cachedDevice;
     return new Promise((resolve) => {
       const p = cp.spawn('ffmpeg', ['-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let stderr = '';
       p.stderr?.on('data', (d: Buffer) => (stderr += d.toString()));
-      p.on('error', () => resolve('Microphone'));
+      p.on('error', () => { AudioCapture._cachedDevice = 'Microphone'; resolve('Microphone'); });
       p.on('close', () => {
         const matches = [...stderr.matchAll(/"([^"]+)"\s+\(audio\)/g)];
-        resolve(matches.length > 0 ? matches[0][1] : 'Microphone');
+        AudioCapture._cachedDevice = matches.length > 0 ? matches[0][1] : 'Microphone';
+        resolve(AudioCapture._cachedDevice);
       });
     });
   }
@@ -271,26 +274,25 @@ export class AudioCapture {
         if (trimmed) this.onFfmpegLog?.(trimmed);
       }
 
-      // silence_start = user stopped talking.
-      // Mark that real speech was present, then arm the 15s extended-silence
-      // timer — but only after _hadSpeech is already true (set by silence_end
-      // below), so the startup silence doesn't arm the timer before the user
-      // has spoken at all.
+      // silence_start = user stopped talking (after the silence duration d=5s).
+      // Fire onSilenceStart (VAD auto-stop) if we've had real speech.
       if (/silence_start/i.test(chunk)) {
-        if (this._hadSpeech && !this._extendedSilenceTimer) {
-          this._extendedSilenceTimer = setTimeout(() => {
-            this._extendedSilenceTimer = null;
-            this.onExtendedSilence?.();
-          }, 15000);
+        if (this._hadSpeech) {
+          this.onSilenceStart?.(); // primary VAD stop signal
+          if (!this._extendedSilenceTimer) {
+            this._extendedSilenceTimer = setTimeout(() => {
+              this._extendedSilenceTimer = null;
+              this.onExtendedSilence?.();
+            }, 15000);
+          }
         }
       }
 
-      // silence_end = user started talking again after a pause.
-      // This is the natural segment boundary used by the original VAD design.
+      // silence_end = user started talking again.
       if (/silence_end/i.test(chunk)) {
-        this._hadSpeech = true;      // confirmed: mic is live and user spoke
-        this._clearExtendedTimer(); // user talking — cancel any pending auto-pause
-        this.onSilenceDetected?.(); // signal VTPPanel to process this segment
+        this._hadSpeech = true;
+        this._clearExtendedTimer();
+        this.onSilenceDetected?.();
       }
     });
 

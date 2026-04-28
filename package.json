@@ -69,7 +69,8 @@
     "build": "webpack --mode production",
     "watch": "webpack --watch --mode development",
     "package": "vsce package --out vtp-voice-prompt.vsix",
-    "compile": "tsc --noEmit"
+    "compile": "webpack --mode production && tsc --noEmit",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

@@ -177,21 +177,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     try {
       this.log.appendLine('[VTP] Starting FFmpeg audio capture...');
 
-      // ── VAD callbacks (WSA mode) ──────────────────────────────────────────────
-      // onSilenceDetected fires on silence_END (= user STARTS talking). In WSA
-      // mode this is not useful — Web Speech API handles transcription. Null it
-      // out so starting to talk never accidentally triggers an auto-pause.
-      this.capture.onSilenceDetected = null;
-
-      // onExtendedSilence fires 15s after silence_START (user has been quiet).
-      // Still useful in WSA mode: auto-pause after a long idle period.
-      this.capture.onExtendedSilence = () => {
-        if (this.isPaused) return;
-        this.log.appendLine('[VTP] WSA: 15s idle — auto-pausing.');
-        this.isPaused = true;
-        this.send({ type: 'autoPaused' });
-      };
-
       // ── Reset state for new session ─────────────────────────────────────────
       this.isPaused           = false;
       this._stopping          = false;
@@ -202,10 +187,31 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this._vadStop           = false;
       this._cancelChunks      = false;
 
-      // Web Speech API handles transcription — no chunk callbacks needed.
-      // FFmpeg runs in single-file mode just for silence/VAD detection.
-      this.capture.onChunkReady  = null;
-      this.capture.onChunkSkipped = null;
+      // ── Wire chunk callbacks ────────────────────────────────────────────────
+      this.capture.onChunkReady = (chunk) => {
+        if (this._cancelChunks) return;
+        this._chunkQueue = this._chunkQueue.then(
+          () => this.processLiveChunk(chunk.buffer, chunk.mimeType),
+        );
+      };
+
+      this.capture.onChunkSkipped = () => {
+        this.log.appendLine('[VTP] Chunk skipped — audio too quiet (check mic volume).');
+      };
+
+      // ── VAD: auto-stop when user has been silent for d=5s ──────────────────
+      // onSilenceStart fires when FFmpeg detects silence_start (user stopped talking).
+      this.capture.onSilenceStart = () => {
+        if (this.isPaused || this._stopping || !this.capture.isRecording()) return;
+        this.log.appendLine('[VTP] VAD: silence detected — auto-stopping.');
+        this._vadStop = true;
+        void this.stopRecording();
+      };
+
+      // onSilenceDetected fires on silence_END (user starts talking) — not used here.
+      this.capture.onSilenceDetected = null;
+
+      this.capture.onExtendedSilence = null; // _extendedSilenceTimer still arms internally
 
       this.capture.onFfmpegLog = (line) => {
         if (/error|warning|cannot|failed|invalid|no such|unable|permission/i.test(line) &&
@@ -214,10 +220,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         }
       };
 
-      // Start FFmpeg in single-file (VAD) mode — no chunk segmenting.
-      await this.capture.start(300);
+      await this.capture.startChunked();
       this.send({ type: 'recordingStarted' });
-      this.log.appendLine('[VTP] Recording started (Web Speech API transcription, FFmpeg VAD).');
+      this.log.appendLine('[VTP] Recording started (chunked mode — live transcript active).');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.log.appendLine(`[VTP] Failed to start recording: ${msg}`);
@@ -235,15 +240,34 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.send({ type: 'recordingStopped' });
 
     try {
-      // In WSA mode, FFmpeg runs in single-file VAD mode — just stop it.
-      await this.capture.stop();
-      this.interimTranscript = '';
+      // Stop chunked FFmpeg and flush remaining segment files.
+      await this.capture.stopChunked();
+      // Wait for all queued Gemini transcription calls to finish.
+      await this._chunkQueue;
 
-      // Auto-restart for VAD-triggered stops (continuous/always-on mode)
+      const finalText = this.interimTranscript.trim();
+      this.interimTranscript = '';
+      const hasSpeech = finalText.length > 0;
+
+      if (hasSpeech) {
+        this.log.appendLine(`[VTP] Final transcript (${finalText.length} chars): "${finalText}"`);
+        await this.onFinalTranscript(finalText);
+      }
+
+      // ── VAD restart / auto-pause logic ─────────────────────────────────────
       if (this._vadStop && !this._restartAfterSend) {
         this._vadStop = false;
-        this.log.appendLine('[VTP] VAD stop — restarting for continuous listening.');
-        void this.startRecording();
+        if (!hasSpeech) {
+          this.log.appendLine('[VTP] No speech detected.');
+          this.log.appendLine('[VTP] VAD stop with no speech — entering auto-pause.');
+          this.isPaused = true;
+          this.send({ type: 'autoPaused' });
+          this.log.appendLine('[VTP] Wake monitor: say "resume", "continue", or "I\'m back"...');
+          void this.checkForWakePhrase();
+        } else if (!this.isPaused) {
+          this.log.appendLine('[VTP] VAD stop — restarting for continuous listening.');
+          void this.startRecording();
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -275,9 +299,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private async resumeRecording(): Promise<void> {
     this.isPaused = false;
     this.log.appendLine('[VTP] Resumed — restarting to re-wire VAD callbacks.');
-    // Always stop + restart: checkForWakePhrase detaches onSilenceDetected and
-    // onExtendedSilence. Without a full restart those callbacks stay null and
-    // auto-pause can never fire again.
     if (this.capture.isRecording()) {
       await this.capture.stopChunked();
     }
@@ -344,18 +365,15 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
         if (!this.isPaused) { await this.capture.stop(); break; }
 
-        // Give the user 1.5s to finish saying the full phrase before stopping.
+        // Give the user 1.5s to finish the full phrase before stopping.
         await new Promise<void>((r) => setTimeout(r, 1500));
         const result = await this.capture.stop();
         this.capture.onSilenceDetected = null;
 
         if (!result) continue;
 
-        // ── Energy gate — skip Gemini if buffer is silent ──────────────────────
-        if (!this._hasVoiceEnergy(result.buffer)) {
-          // Timeout cycle with no real speech — restart quietly.
-          continue;
-        }
+        // ── Energy gate ────────────────────────────────────────────────────────
+        if (!this._hasVoiceEnergy(result.buffer)) continue;
 
         // ── Transcribe with Gemini ──────────────────────────────────────────────
         const base64 = result.buffer.toString('base64');
@@ -398,7 +416,16 @@ export class VTPPanel implements vscode.WebviewViewProvider {
           this.isPaused    = false;
           this.justResumed = true;
           this.send({ type: 'resumed' });
-          await this.startRecording(); // restarts chunked mode + re-wires VAD
+
+          // ── Compound command: "resume and send the prompt" ──────────────────
+          // If the same utterance also contains a send trigger, inject the
+          // buffer immediately without waiting for new dictation.
+          const hasSendInWake = this._hasSendTrigger(text);
+          await this.startRecording();
+          if (hasSendInWake && this.promptBuffer.trim()) {
+            this.log.appendLine('[VTP] Wake+send compound — injecting buffer immediately.');
+            await this.injectRaw();
+          }
           return;
         }
       } catch (err) {
@@ -897,9 +924,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleMicDenied(): Promise<void> {
-    // Webview mic denied — route through FFmpeg instead (already handled)
-    this.log.appendLine('[VTP] Webview mic denied — FFmpeg capture is used instead.');
+  private handleMicDenied(): void {
+    // In chunked mode, FFmpeg is already the primary mic source.
+    // micPermissionDenied from the webview is expected and harmless — ignore.
+    this.log.appendLine('[VTP] Webview mic denied — FFmpeg is active (expected).');
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
