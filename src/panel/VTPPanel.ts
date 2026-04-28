@@ -295,8 +295,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
    */
   private async checkForWakePhrase(): Promise<void> {
     // ── Preserve transcript before stopping ──────────────────────────────────
-    // interimTranscript holds everything said since last recording start.
-    // stopChunked() discards remaining segments — save to promptBuffer first.
     const savedTranscript = this.interimTranscript
       .replace(/\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
     if (savedTranscript) {
@@ -307,16 +305,16 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.interimTranscript = '';
 
     // ── Stop chunked recording before entering single-file wake monitor ───────
-    this.capture.onChunkReady = null;   // stop processing new chunks
-    await this._chunkQueue;             // drain in-flight transcriptions
-    await this.capture.stopChunked();   // kill FFmpeg + cleanup segments
+    this.capture.onChunkReady = null;
+    await this._chunkQueue;
+    await this.capture.stopChunked();
 
     if (!this.isPaused) return;
 
     const apiKey = await this.secretManager.getApiKey();
     if (!apiKey) return;
 
-    // Detach VAD callbacks so they don't fire inside the monitor loop
+    // Detach VAD callbacks — the wake monitor wires its own below.
     this.capture.onSilenceDetected = null;
     this.capture.onExtendedSilence = null;
 
@@ -324,26 +322,45 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
     while (this.isPaused) {
       try {
-        await this.capture.start();                            // single-file mode
+        // ── Wait for speech using FFmpeg silencedetect ─────────────────────────
+        // onSilenceDetected fires on silence_END = the moment the user starts
+        // speaking.  We never call Gemini if the mic stays silent/muted.
+        let speechDetectedResolve!: () => void;
+        const speechDetected = new Promise<void>((r) => { speechDetectedResolve = r; });
 
-        // DirectShow on Windows needs ~400ms to initialise fully.
-        // Keep this short — users say "resume" immediately after the prompt
-        // and a long dead-zone means the word is swallowed every iteration.
-        await new Promise<void>((r) => setTimeout(r, 400));    // short init wait
+        await this.capture.start();           // single-file mode with silencedetect
+        await new Promise<void>((r) => setTimeout(r, 300)); // DirectShow init
         if (!this.isPaused) { await this.capture.stop(); break; }
-        this.log.appendLine('[VTP] Wake monitor ready — say "resume", "continue", or "I\'m back" now...');
-        this.send({ type: 'wakeReady' }); // lets the UI show a "listening" flash
 
-        await new Promise<void>((r) => setTimeout(r, 5000));   // 5s real capture
+        this.capture.onSilenceDetected = () => speechDetectedResolve();
+        this.log.appendLine('[VTP] Wake monitor: waiting for speech...');
+        this.send({ type: 'wakeReady' });
+
+        // Block until speech OR 30s timeout (then cycle FFmpeg to avoid staleness)
+        await Promise.race([
+          speechDetected,
+          new Promise<void>((r) => setTimeout(r, 30_000)),
+        ]);
+
+        if (!this.isPaused) { await this.capture.stop(); break; }
+
+        // Give the user 1.5s to finish saying the full phrase before stopping.
+        await new Promise<void>((r) => setTimeout(r, 1500));
         const result = await this.capture.stop();
+        this.capture.onSilenceDetected = null;
 
-        if (!this.isPaused) break;
         if (!result) continue;
 
+        // ── Energy gate — skip Gemini if buffer is silent ──────────────────────
+        if (!this._hasVoiceEnergy(result.buffer)) {
+          // Timeout cycle with no real speech — restart quietly.
+          continue;
+        }
+
+        // ── Transcribe with Gemini ──────────────────────────────────────────────
         const base64 = result.buffer.toString('base64');
         const genai  = new GoogleGenerativeAI(apiKey);
 
-        // Cascade: 2.5-flash → 2.5-flash-lite → 1.5-flash. Catches 5xx and deprecated 404s.
         const WAKE_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-1.5-flash'];
         let wakeRaw = '';
         for (const modelName of WAKE_MODELS) {
@@ -372,7 +389,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
           }
         }
         const clean = this.sanitizeTranscription(wakeRaw);
-        if (!clean) continue; // all-noise response — skip without logging
+        if (!clean) continue;
         const text = clean.toLowerCase();
         this.log.appendLine(`[VTP] Wake monitor heard: "${text}"`);
 
@@ -508,8 +525,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         ? this.interimTranscript + ' ' + text
         : text;
 
-      // Show rolling live text in the transcript box
-      this.send({ type: 'transcriptResult', text: this.interimTranscript });
+      // Show rolling live text — always prepend the accumulated buffer so the
+      // display doesn't reset when VAD stops and restarts mid-dictation.
+      const displayText = this.promptBuffer
+        ? this.promptBuffer + ' ' + this.interimTranscript
+        : this.interimTranscript;
+      this.send({ type: 'transcriptResult', text: displayText });
       this.log.appendLine(`[VTP] Live chunk: "${text}"`);
 
       // Detect send trigger in accumulated text — auto-stop without user clicking

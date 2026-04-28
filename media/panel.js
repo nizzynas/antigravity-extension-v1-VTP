@@ -354,12 +354,21 @@
         break;
 
       case 'transcriptResult':
-        // Host sends this to sync the display after cancel / send / clear commands.
-        committedText = msg.text || '';
-        interimText   = '';
-        renderLiveTranscript();
-        if (!isPaused) setStatus('idle', 'Ready — press Record');
+        if (isRecording && !isPaused) {
+          // Live rolling update — host prepends full buffer, just render it.
+          if (msg.text) {
+            transcriptBox.innerHTML = msg.text;
+            transcriptBox.classList.add('has-content');
+          }
+        } else {
+          // Final sync after send / cancel / clear.
+          committedText = msg.text || '';
+          interimText   = '';
+          renderLiveTranscript();
+          if (!isPaused) setStatus('idle', 'Ready — press Record');
+        }
         break;
+
 
       case 'intentResult':
         break;
