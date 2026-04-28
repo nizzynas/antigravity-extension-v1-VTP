@@ -57,7 +57,9 @@ export type PanelMessage =
   /** Web Speech API live interim — fires word-by-word as the user speaks */
   | { type: 'speechInterim'; text: string }
   /** Web Speech API final utterance — one completed sentence for intent processing */
-  | { type: 'speechFinal'; segment: string; committed: string };
+  | { type: 'speechFinal'; segment: string; committed: string }
+  /** Enhancement review decision: approve keeps enhanced, reject restores original, regenerate re-elaborates */
+  | { type: 'enhancementDecision'; action: 'approve' | 'reject' | 'regenerate' };
 
 
 /** Messages sent FROM the extension host TO the Webview */
@@ -65,7 +67,9 @@ export type ExtensionMessage =
   | { type: 'intentResult'; intent: IntentResult; buffer: string }
   | { type: 'commandFired'; description: string }
   | { type: 'elaborating' }
-  | { type: 'elaborated'; prompt: string }
+  | { type: 'elaborated'; prompt: string; original: string }   // prompt=enhanced, original=saved original
+  | { type: 'enhancedApproved' }                               // panel: commit enhanced text
+  | { type: 'enhancedRejected'; original: string }             // panel: restore original text
   | { type: 'injected' }
   | { type: 'error'; message: string }
   | { type: 'contextUpdate'; workspaceName: string; conversationTitle: string }

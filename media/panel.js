@@ -28,21 +28,29 @@
   const btnVad           = document.getElementById('btn-vad');
   const btnApiKey        = document.getElementById('btn-apikey');
   const btnInfo          = document.getElementById('btn-info');
-  const btnSend          = document.getElementById('btn-send');
-  const btnClear         = document.getElementById('btn-clear');
-  const btnCopy          = document.getElementById('btn-copy');
-  const promptBox        = document.getElementById('prompt-box');
-  const promptSection    = document.getElementById('prompt-section');
-  const commandSection   = document.getElementById('command-section');
-  const commandLog       = document.getElementById('command-log');
   const spinner          = document.getElementById('spinner');
   const recordHint       = document.getElementById('record-hint');
+  const commandSection   = document.getElementById('command-section');
+  const commandLog       = document.getElementById('command-log');
+  // Enhance review
+  const enhanceReview    = document.getElementById('enhance-review');
+  const enhancedText     = document.getElementById('enhanced-text');
+  const originalText     = document.getElementById('original-text');
+  const btnApprove       = document.getElementById('btn-approve');
+  const btnReject        = document.getElementById('btn-reject');
+  const btnRegen         = document.getElementById('btn-regen');
 
   // ─── State ─────────────────────────────────────────────────────────────────
   let isRecording    = false;
   let isPaused       = false;
   let vadMode        = false;
   let hasApiKey      = false;
+  /** True while the enhance review card is visible */
+  let isReviewing    = false;
+  /** Saved enhanced text for approve path */
+  let savedEnhanced  = '';
+  /** Saved original text for reject path */
+  let savedOriginal  = '';
 
   /** Committed text from previous completed utterances this session. */
   let committedText  = '';
@@ -272,16 +280,38 @@
     committedText = '';
     interimText   = '';
     isPaused = false;
-    promptBox.value = '';
+    isReviewing = false;
     commandLog.innerHTML = '';
     renderTranscript('');
-    promptSection.classList.add('hidden');
     commandSection.classList.add('hidden');
+    hideEnhanceReview();
     spinner.classList.add('hidden');
     btnPause.classList.add('hidden');
     setStatus('idle', 'Ready — press Record');
     setRecording(false);
     post({ type: 'cancel' });
+  }
+
+  function showEnhanceReview(enhanced, original) {
+    isReviewing = true;
+    savedEnhanced = enhanced;
+    savedOriginal = original;
+    // Show the enhanced text in the transcript box with a visual cue
+    committedText = enhanced;
+    interimText   = '';
+    transcriptBox.innerHTML = enhanced;
+    transcriptBox.classList.add('has-content', 'enhanced-mode');
+    // Populate the review card
+    enhancedText.textContent = enhanced;
+    originalText.textContent = original;
+    enhanceReview.classList.remove('hidden');
+    setStatus('ready', '✨ Approve, Reject, or Try Again');
+  }
+
+  function hideEnhanceReview() {
+    isReviewing = false;
+    enhanceReview.classList.add('hidden');
+    transcriptBox.classList.remove('enhanced-mode');
   }
 
   function post(msg) { vscode.postMessage(msg); }
@@ -380,16 +410,26 @@
 
       case 'elaborating':
         spinner.classList.remove('hidden');
-        promptSection.classList.add('hidden');
-        setStatus('processing', 'Elaborating with Gemini…');
+        hideEnhanceReview();
+        setStatus('processing', 'Enhancing with Gemini…');
         break;
 
       case 'elaborated':
         spinner.classList.add('hidden');
-        promptSection.classList.remove('hidden');
-        promptBox.value = msg.prompt;
-        promptBox.focus();
-        setStatus('ready', 'Review and send');
+        showEnhanceReview(msg.prompt, msg.original);
+        break;
+
+      case 'enhancedApproved':
+        hideEnhanceReview();
+        setStatus('idle', '✨ Enhancement approved');
+        break;
+
+      case 'enhancedRejected':
+        hideEnhanceReview();
+        committedText = msg.original;
+        interimText   = '';
+        renderLiveTranscript();
+        setStatus('idle', '↩ Original restored');
         break;
 
       case 'injected':
@@ -446,6 +486,16 @@
 
   btnApiKey.addEventListener('click', () => post({ type: 'openSettings' }));
   btnInfo.addEventListener('click',   () => post({ type: 'showInfo' }));
+
+  // Enhance review buttons
+  btnApprove.addEventListener('click', () => post({ type: 'enhancementDecision', action: 'approve' }));
+  btnReject.addEventListener('click',  () => post({ type: 'enhancementDecision', action: 'reject' }));
+  btnRegen.addEventListener('click',   () => {
+    spinner.classList.remove('hidden');
+    hideEnhanceReview();
+    setStatus('processing', 'Enhancing with Gemini…');
+    post({ type: 'enhancementDecision', action: 'regenerate' });
+  });
 
   btnSend.addEventListener('click', () => {
     const prompt = promptBox.value.trim();

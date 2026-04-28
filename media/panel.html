@@ -56,9 +56,23 @@
     </div>
 
     <!-- Transcript -->
-    <div class="card">
+    <div class="card" id="transcript-card">
       <div class="card-label">Transcript</div>
       <div id="transcript-box" class="transcript-box">Your speech will appear here...</div>
+    </div>
+
+    <!-- Enhancement review (hidden until elaboration completes) -->
+    <div id="enhance-review" class="card enhance-review hidden">
+      <div class="card-label">✨ Enhanced Prompt</div>
+      <div id="enhanced-text" class="enhanced-text"></div>
+      <div class="original-label">Original text:</div>
+      <div id="original-text" class="original-text"></div>
+      <div class="enhance-voice-hint">🎙 Say <em>"approve"</em>, <em>"reject"</em>, or <em>"try again"</em></div>
+      <div class="enhance-actions">
+        <button id="btn-approve" class="btn-approve" title="Keep enhanced version">✓ Approve</button>
+        <button id="btn-reject"  class="btn-reject"  title="Restore original">✗ Reject</button>
+        <button id="btn-regen"   class="btn-regen"   title="Generate a new enhancement">🔄 Try Again</button>
+      </div>
     </div>
 
     <div class="card glossary-card">
@@ -78,7 +92,11 @@
           </tr>
           <tr>
             <td><code>enhance this prompt</code></td>
-            <td>Rewrites prompt with Gemini for clarity &amp; detail.</td>
+            <td>Rewrites prompt with Gemini. Approve / Reject / Try Again inline.</td>
+          </tr>
+          <tr>
+            <td><code>approve</code> / <code>reject</code> / <code>try again</code></td>
+            <td>Voice-control the enhancement review.</td>
           </tr>
           <tr>
             <td><code>cancel</code> / <code>clear that</code></td>
@@ -116,21 +134,10 @@
       <div id="command-log" class="command-log"></div>
     </div>
 
-    <!-- Elaborated prompt (hidden until elaboration runs) -->
-    <div id="prompt-section" class="card hidden">
-      <div class="card-label">✏ Elaborated Prompt</div>
-      <textarea id="prompt-box" class="prompt-box" rows="7" placeholder="Gemini will elaborate your notes here..."></textarea>
-      <div class="prompt-actions">
-        <button id="btn-clear" class="btn-ghost">🗑 Clear</button>
-        <button id="btn-copy" class="btn-ghost">📋 Copy</button>
-        <button id="btn-send" class="btn-primary">▶ Send</button>
-      </div>
-    </div>
-
     <!-- Spinner (hidden until elaboration starts) -->
     <div id="spinner" class="spinner hidden">
       <div class="spinner-ring"></div>
-      <span>Elaborating with Gemini...</span>
+      <span>Enhancing with Gemini...</span>
     </div>
 
   </div>

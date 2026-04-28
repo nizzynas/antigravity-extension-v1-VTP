@@ -48,6 +48,11 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   /** Set when a send/pause command is detected mid-stream — skips remaining in-flight chunks. */
   private _cancelChunks      = false;
 
+  /** True while waiting for the user to approve / reject / regenerate an enhancement. */
+  private _awaitingEnhancementDecision = false;
+  /** The original promptBuffer content saved before elaboration runs. */
+  private _originalBufferBeforeEnhance = '';
+
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly secretManager: SecretManager,
@@ -106,14 +111,18 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         break;
       }
       case 'cancel':
+        this._awaitingEnhancementDecision = false;
         this.promptBuffer      = '';
         this.interimTranscript = '';
         this.send({ type: 'transcriptResult', text: '' });
         this.log.appendLine('[VTP] Buffer cleared.');
         break;
+      case 'enhancementDecision':
+        await this.handleEnhancementDecision(msg.action);
+        break;
       case 'openSettings':        await this.handleOpenSettings(); break;
       case 'showInfo':            await this.showApiKeyInfo(); break;
-      case 'micPermissionDenied': await this.handleMicDenied(); break;
+      case 'micPermissionDenied': this.handleMicDenied(); break;
       case 'log':
         this.log.appendLine(msg.message);
         break;
@@ -533,17 +542,22 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       if (!text || /^\[\s*SILENCE\s*\]$/i.test(text)) return;
 
       // ── Real-time pause detection ────────────────────────────────────────────
-      // Only fire if the entire chunk IS a pause command — never if "pause"
-      // appears inside a longer dictation sentence (avoids false positives).
+      // Only fire if the entire chunk IS a pause command.
+      // IMPORTANT: do NOT set _cancelChunks on pause — let all already-queued
+      // chunks finish transcribing so the user's full 5 sentences are captured
+      // before the pause takes effect.
       const PAUSE_CMD = /^[\s.,!?]*(pause(\s+(vtp|recording|listening))?|stop\s+listening)[\s.,!?]*$/i;
       if (PAUSE_CMD.test(text)) {
-        this.log.appendLine('[VTP] Live chunk: "pause" detected — pausing immediately.');
-        this._cancelChunks = true;  // drop all remaining queued chunks
-        this.interimTranscript = ''; // discard so the word "pause" doesn't appear
-        this.send({ type: 'transcriptResult', text: this.promptBuffer });
-        this.isPaused = true;
-        this.send({ type: 'paused' });
-        void this.checkForWakePhrase();
+        this.log.appendLine('[VTP] Live chunk: "pause" detected — pausing after queue drains.');
+        // Do NOT set _cancelChunks. Let all previously-queued chunks finish.
+        // Queue the pause itself at the END so it runs after every earlier chunk.
+        this._chunkQueue = this._chunkQueue.then(() => {
+          this.interimTranscript = ''; // discard only the "pause" word
+          this.send({ type: 'transcriptResult', text: this.promptBuffer });
+          this.isPaused = true;
+          this.send({ type: 'paused' });
+          void this.checkForWakePhrase();
+        });
         return;
       }
       // ────────────────────────────────────────────────────────────────────────
@@ -673,6 +687,27 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   // ─── Intent processing ────────────────────────────────────────────────────
 
   private async onFinalTranscript(segment: string): Promise<void> {
+    // ── Enhancement review intercept — voice approve / reject / regenerate ──
+    if (this._awaitingEnhancementDecision) {
+      const lc = segment.toLowerCase();
+      if (/\b(approve|accept|looks? good|yes|use it|perfect|great|send it|keep it|apply)\b/.test(lc)) {
+        this.log.appendLine('[VTP] Voice command: approve enhancement.');
+        await this.handleEnhancementDecision('approve');
+        return;
+      }
+      if (/\b(reject|revert|no|go back|undo|restore|cancel|discard|original)\b/.test(lc)) {
+        this.log.appendLine('[VTP] Voice command: reject enhancement.');
+        await this.handleEnhancementDecision('reject');
+        return;
+      }
+      if (/\b(regenerate|try again|redo|new version|another|different|again)\b/.test(lc)) {
+        this.log.appendLine('[VTP] Voice command: regenerate enhancement.');
+        await this.handleEnhancementDecision('regenerate');
+        return;
+      }
+      // Fall through — user said something unrelated, append to buffer
+    }
+
     // ── Local voice commands (no Gemini needed) ────────────────────────────
     // Pause is only triggered when the utterance IS the command — not when the
     // word "pause" appears inside a longer dictation sentence.
@@ -869,6 +904,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.ensurePipeline(apiKey);
     this.send({ type: 'elaborating' });
 
+    // Save original BEFORE elaboration so reject/regenerate can restore it.
+    this._originalBufferBeforeEnhance = this.promptBuffer;
+
     try {
       const [context, conversation] = await Promise.all([
         this.contextCollector.collect(),
@@ -880,10 +918,35 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       );
 
       this.promptBuffer = elaborated;
-      this.send({ type: 'elaborated', prompt: elaborated });
+      this._awaitingEnhancementDecision = true;
+      this.send({ type: 'elaborated', prompt: elaborated, original: this._originalBufferBeforeEnhance });
     } catch (err) {
+      this._awaitingEnhancementDecision = false;
       const msg = this.formatError(err);
       this.send({ type: 'error', message: msg });
+    }
+  }
+
+  /** Handle approve / reject / regenerate from panel buttons or voice */
+  private async handleEnhancementDecision(action: 'approve' | 'reject' | 'regenerate'): Promise<void> {
+    this._awaitingEnhancementDecision = false;
+
+    if (action === 'approve') {
+      // promptBuffer already has enhanced text — nothing to do on host side.
+      this.log.appendLine('[VTP] Enhancement approved.');
+      this.send({ type: 'enhancedApproved' });
+
+    } else if (action === 'reject') {
+      // Restore the original buffer.
+      this.promptBuffer = this._originalBufferBeforeEnhance;
+      this.log.appendLine('[VTP] Enhancement rejected — original restored.');
+      this.send({ type: 'enhancedRejected', original: this._originalBufferBeforeEnhance });
+
+    } else if (action === 'regenerate') {
+      // Restore original, then re-run elaboration from scratch.
+      this.promptBuffer = this._originalBufferBeforeEnhance;
+      this.log.appendLine('[VTP] Enhancement regenerate — re-elaborating original.');
+      await this.elaborateAndShow();
     }
   }
 
