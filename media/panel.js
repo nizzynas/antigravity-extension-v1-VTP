@@ -2,8 +2,10 @@
 
 /**
  * VTP Webview Panel script.
- * Audio capture is handled by the VS Code Speech extension (extension host side).
- * This script only manages UI state and relays messages.
+ *
+ * Audio pipeline:
+ *   - SpeechRecognition  → live interim transcript (visual only, instant)
+ *   - FFmpeg + Gemini    → final accurate transcription + intent classification
  */
 
 (function () {
@@ -30,10 +32,74 @@
   const recordHint       = document.getElementById('record-hint');
 
   // ─── State ─────────────────────────────────────────────────────────────────
-  let isRecording   = false;
-  let vadMode       = false;
-  let hasApiKey     = false;
-  let fullTranscript = '';
+  let isRecording    = false;
+  let vadMode        = false;
+  let hasApiKey      = false;
+  let fullTranscript = '';       // accumulated final buffer shown in transcript box
+  let liveText       = '';       // interim SpeechRecognition result (not persisted)
+
+  // ─── Live transcript — Web Speech API ─────────────────────────────────────
+  // Runs in parallel with FFmpeg. Provides instant visual feedback while the
+  // user is speaking. Final intent classification still uses Gemini.
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+  let recognition = null;
+
+  if (SR) {
+    recognition = new SR();
+    recognition.continuous    = true;
+    recognition.interimResults = true;
+    recognition.lang          = 'en-US';
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        interim += e.results[i][0].transcript;
+      }
+      liveText = interim;
+      // Show live interim text on top of any committed buffer
+      const committed = fullTranscript ? fullTranscript + ' ' : '';
+      transcriptBox.innerHTML =
+        (committed ? `<span class="final">${escHtml(committed)}</span>` : '') +
+        `<span class="interim">${escHtml(interim)}</span>`;
+    };
+
+    recognition.onerror = (e) => {
+      // Ignore "no-speech" — user may have paused. Other errors are silent.
+      if (e.error !== 'no-speech') {
+        console.warn('[VTP SR]', e.error);
+      }
+    };
+
+    recognition.onend = () => {
+      // SpeechRecognition auto-stops after silence; restart if still recording
+      if (isRecording) {
+        try { recognition.start(); } catch (_) {}
+      }
+    };
+  }
+
+  function startLiveTranscript() {
+    liveText = '';
+    if (recognition) {
+      try { recognition.start(); } catch (_) {}
+    }
+  }
+
+  function stopLiveTranscript() {
+    if (recognition) {
+      try { recognition.stop(); } catch (_) {}
+    }
+  }
+
+  function escHtml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
 
   // ─── UI helpers ────────────────────────────────────────────────────────────
 
@@ -54,6 +120,14 @@
     }
   }
 
+  function renderTranscript() {
+    if (fullTranscript) {
+      transcriptBox.innerHTML = `<span class="final">${escHtml(fullTranscript)}</span>`;
+    } else {
+      transcriptBox.textContent = 'Your speech will appear here...';
+    }
+  }
+
   function addCommandEntry(text) {
     commandSection.classList.remove('hidden');
     const el = document.createElement('div');
@@ -65,9 +139,10 @@
 
   function clearAll() {
     fullTranscript = '';
+    liveText = '';
     promptBox.value = '';
     commandLog.innerHTML = '';
-    transcriptBox.textContent = 'Your speech will appear here…';
+    transcriptBox.textContent = 'Your speech will appear here...';
     transcriptBox.classList.remove('active');
     promptSection.classList.add('hidden');
     commandSection.classList.add('hidden');
@@ -94,7 +169,9 @@
       case 'apiKeyStatus':
         hasApiKey = msg.hasKey;
         btnApiKey.classList.toggle('key-set', msg.hasKey);
-        btnApiKey.title = msg.hasKey ? 'Gemini key active ✓ (click to update)' : 'No API key — click to add';
+        btnApiKey.title = msg.hasKey
+          ? 'Gemini key active ✓ (click to update)'
+          : 'No API key — click to add';
         break;
 
       case 'contextUpdate':
@@ -104,27 +181,36 @@
 
       case 'recordingStarted':
         setRecording(true);
+        startLiveTranscript();
         break;
 
       case 'recordingStopped':
         setRecording(false);
-        setStatus('idle', 'Ready — press Record');
+        stopLiveTranscript();
+        liveText = '';
+        // Show "Transcribing…" while Gemini processes — replaces interim text
+        if (!fullTranscript) {
+          transcriptBox.innerHTML = '<span class="interim">Transcribing…</span>';
+        }
+        setStatus('processing', 'Transcribing…');
         break;
 
       case 'transcriptResult':
+        // Gemini has returned the final clean transcription
         if (msg.text) {
-          // Interim results update in-place; final results accumulate
           fullTranscript = msg.text;
-          transcriptBox.textContent = fullTranscript;
+          renderTranscript();
+          setStatus('idle', 'Ready — press Record');
         }
         break;
 
       case 'intentResult':
-        // Buffer has been updated server-side; keep transcript visible
+        // Buffer updated server-side; transcript box already shows correct text
         break;
 
       case 'commandFired':
         addCommandEntry(msg.description);
+        setStatus('idle', 'Ready — press Record');
         break;
 
       case 'elaborating':
@@ -150,8 +236,7 @@
         spinner.classList.add('hidden');
         setStatus('idle', '⚠ ' + msg.message);
         // NOTE: do NOT call setRecording(false) here — only recordingStopped
-        // should change recording state. Changing it from an error creates a
-        // desync where the UI thinks it's not recording but FFmpeg still is.
+        // should change recording state, otherwise FFmpeg desync occurs.
         break;
     }
   });
@@ -162,6 +247,7 @@
     if (isRecording) {
       post({ type: 'stopRecording' });
       setRecording(false);
+      stopLiveTranscript();
     } else {
       post({ type: 'startRecording' });
       setStatus('listening', 'Starting…');
@@ -175,7 +261,6 @@
     if (vadMode && !isRecording) {
       post({ type: 'startRecording' });
     } else if (!vadMode && isRecording) {
-      // Immediately update UI so user knows we're stopping
       setStatus('idle', 'Stopping…');
       post({ type: 'stopRecording' });
     }

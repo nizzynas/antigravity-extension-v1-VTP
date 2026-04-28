@@ -3,67 +3,72 @@ import * as vscode from 'vscode';
 /**
  * Injects the final prompt into Antigravity chat.
  *
- * Strategy:
- *  1. Focus the Antigravity agent side panel (non-destructive — never opens a new chat)
- *  2. Write prompt to clipboard
- *  3. Show a brief toast: "Prompt copied — Ctrl+V to paste"
- *
- * NOTE: VS Code sandboxing prevents any extension from writing directly into
- * another extension's webview input. Clipboard is the only reliable bridge.
- *
- * The command `antigravity.sendPromptToAgentPanel` is intentionally skipped —
- * it does NOT accept a plain string argument and sends terminal/context
- * references instead of the prompt text.
+ * Strategy (in order of preference):
+ *  1. Try `antigravity.sendPromptToAgentPanel` with the prompt string as arg
+ *     — this command IS able to write to the chat input (we've seen it write text).
+ *     We call it WITHOUT pre-focusing the panel to avoid the auto-attach
+ *     behavior that prepended `@terminal:powershell` last time.
+ *  2. Fallback: clipboard + show "Ctrl+V" notification with panel focus
  */
 export class ChatInjector {
   private didLogCommands = false;
 
   async inject(prompt: string): Promise<void> {
-    // Log Antigravity commands once per session (for debugging/future wiring)
     if (!this.didLogCommands) {
       this.didLogCommands = true;
       await this.logAntigravityCommands();
     }
 
-    await this.focusAntigravityPanel();
+    // ── Attempt 1: sendPromptToAgentPanel with our text as argument ──────────
+    // The @terminal:powershell that appeared before was caused by focusing the
+    // panel FIRST (which triggered Antigravity's auto-attach). Calling the
+    // command directly with text — no pre-focus — should send clean text.
+    const sent = await this.trySendPromptCommand(prompt);
+    if (sent) return;
+
+    // ── Attempt 2: Clipboard + focus + Ctrl+V notification ───────────────────
     await vscode.env.clipboard.writeText(prompt);
+    await this.focusAntigravityPanel();
 
     const action = await vscode.window.showInformationMessage(
       '⚡ VTP: Prompt copied — press Ctrl+V to paste into Antigravity.',
       'Copy Again',
     );
-
     if (action === 'Copy Again') {
       await vscode.env.clipboard.writeText(prompt);
     }
   }
 
   /**
-   * Focuses the Antigravity agent side panel without opening a new chat.
-   * Uses the dedicated focus command if available.
+   * Attempts to call antigravity.sendPromptToAgentPanel with the prompt text.
+   * Returns true if the command executed without throwing.
    */
-  private async focusAntigravityPanel(): Promise<void> {
-    // These commands focus the existing panel — they do NOT create a new chat
-    const FOCUS_COMMANDS = [
-      'antigravity.agentSidePanel.focus',
-      'antigravity.toggleChatFocus',
-      'antigravity.openAgent',
-    ];
-
-    for (const cmd of FOCUS_COMMANDS) {
-      try {
-        await vscode.commands.executeCommand(cmd);
-        return;
-      } catch {
-        // Try next
-      }
+  private async trySendPromptCommand(prompt: string): Promise<boolean> {
+    try {
+      // Pass the prompt string directly as the command argument.
+      // Do NOT call agentSidePanel.focus first — that triggers the
+      // auto-attach of terminal context (@terminal:powershell).
+      await vscode.commands.executeCommand('antigravity.sendPromptToAgentPanel', prompt);
+      return true;
+    } catch {
+      return false;
     }
   }
 
   /**
-   * Logs all registered Antigravity commands to the VTP Debug output channel.
-   * Useful for discovering new commands to wire in future versions.
+   * Focuses the Antigravity agent side panel without triggering context attach.
+   * Only used in the clipboard fallback path.
    */
+  private async focusAntigravityPanel(): Promise<void> {
+    const candidates = [
+      'antigravity.agentSidePanel.focus',
+      'antigravity.openAgent',
+    ];
+    for (const cmd of candidates) {
+      try { await vscode.commands.executeCommand(cmd); return; } catch { /* next */ }
+    }
+  }
+
   private async logAntigravityCommands(): Promise<void> {
     try {
       const all = await vscode.commands.getCommands(true);
@@ -73,8 +78,6 @@ export class ChatInjector {
         channel.appendLine('[VTP ChatInjector] Antigravity commands found:');
         agCmds.forEach((c) => channel.appendLine('  ' + c));
       }
-    } catch {
-      // Non-critical
-    }
+    } catch { /* non-critical */ }
   }
 }
