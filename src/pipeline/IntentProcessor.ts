@@ -21,6 +21,9 @@ const CANCEL_PHRASES = [
 // Minimum word count — single words / mic noise skipped
 const MIN_WORD_COUNT = 2;
 
+// Model cascade: 2 active stable models as of April 2026 (2.0-flash + 1.5-flash deprecated/removed).
+const MODEL_CASCADE = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+
 /**
  * Classifies each transcript segment AND extracts the clean prompt content.
  *
@@ -30,18 +33,12 @@ const MIN_WORD_COUNT = 2;
  *   SEND           — explicit request to inject the prompt as-is
  *   COMMAND        — immediate IDE/OS/terminal action (rare, must be unambiguous)
  *   CANCEL         — discard everything and restart
- *
- * CRITICAL: For ALL intent types the LLM returns a "content" field containing
- * the cleaned prompt text extracted from the segment (filler words and trigger
- * phrases removed). This lets VTPPanel accumulate content even when SEND or
- * ENHANCE is detected in the same breath as the prompt.
  */
 export class IntentProcessor {
-  private readonly model;
+  private readonly genAI: GoogleGenerativeAI;
 
   constructor(apiKey: string) {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    this.model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    this.genAI = new GoogleGenerativeAI(apiKey);
   }
 
   async classify(
@@ -58,7 +55,6 @@ export class IntentProcessor {
     }
 
     // Fast local gates for unambiguous standalone commands
-    // (only triggers when the ENTIRE segment is just the command phrase)
     if (ENHANCE_PHRASES.some((p) => lower === p || lower.replace(/^(uh|um)\s+/, '') === p)) {
       return { type: 'ENHANCE', content: '' };
     }
@@ -69,15 +65,34 @@ export class IntentProcessor {
       return { type: 'CANCEL', content: '' };
     }
 
-    // LLM handles everything else — including mixed segments like
-    // "build a login page, send it" or "enhance this: add auth support"
+    // LLM handles mixed segments — cascade through models on 503 overload
     const systemPrompt = this.buildClassifierPrompt(context, promptBuffer);
-    const result = await this.model.generateContent([
-      { text: systemPrompt },
-      { text: `Classify and extract: "${segment}"` },
-    ]);
+    const lastErr: unknown[] = [];
 
-    return this.parseResponse(result.response.text(), segment);
+    for (const modelName of MODEL_CASCADE) {
+      try {
+        const model = this.genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent([
+          { text: systemPrompt },
+          { text: `Classify and extract: "${segment}"` },
+        ]);
+        return this.parseResponse(result.response.text(), segment);
+      } catch (err: unknown) {
+        const msg = String(err);
+        const is5xxOrGone = msg.includes('503') || msg.includes('500') ||
+                             msg.includes('404') || msg.includes('Service Unavailable') ||
+                             msg.includes('high demand') || msg.includes('overloaded') ||
+                             msg.includes('no longer available') || msg.includes('Internal error');
+        if (is5xxOrGone) {
+          lastErr.push(err);
+          continue; // try next model immediately — no wait
+        }
+        throw err; // non-503 (e.g. 429, auth) — rethrow for caller
+      }
+    }
+
+    // All models overloaded — caller's withRetry will handle
+    throw lastErr[lastErr.length - 1];
   }
 
   private buildClassifierPrompt(ctx: WorkspaceContext, buffer: string): string {
@@ -106,9 +121,6 @@ EXAMPLES:
 
   Segment: "enhance this: add TypeScript strict mode to the auth module"
   → type: "ENHANCE", content: "add TypeScript strict mode to the auth module"
-
-  Segment: "build a REST API for users, enhance that"
-  → type: "ENHANCE", content: "build a REST API for users"
 
   Segment: "I want a dark mode toggle in the navbar"
   → type: "PROMPT_CONTENT", content: "I want a dark mode toggle in the navbar"
@@ -150,7 +162,6 @@ Respond with JSON ONLY — no markdown:
         commandIntent: parsed.commandIntent,
       };
     } catch {
-      // If JSON parse fails, treat entire segment as prompt content
       return { type: 'PROMPT_CONTENT', content: fallbackSegment };
     }
   }

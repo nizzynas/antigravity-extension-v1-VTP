@@ -73,5 +73,6 @@ export type ExtensionMessage =
   | { type: 'vadAutoStop' }
   | { type: 'paused' }       // manual pause confirmed
   | { type: 'resumed' }      // manual resume confirmed
-  | { type: 'autoPaused' };  // auto-pause triggered by extended silence
+  | { type: 'autoPaused' }   // auto-pause triggered by extended silence
+  | { type: 'wakeReady' };   // FFmpeg initialized, wake monitor is listening
 

@@ -44,6 +44,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private _sendTriggerFired  = false;
   private _restartAfterSend  = false;
   private _vadStop           = false;  // true when stop was triggered by VAD silence
+  private _stopping          = false;  // guard against concurrent stopRecording calls
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -161,14 +162,16 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
       this.capture.onSilenceDetected = () => {
         if (!this.capture.isRecording()) return;
-        if (this.isPaused) {
+        // Don't enter wake monitor if a send is actively in progress —
+        // isPaused may be stale from a concurrent auto-pause race.
+        if (this.isPaused && !this._restartAfterSend) {
           this.log.appendLine('[VTP] Pause monitor: checking for wake phrase...');
           this.checkForWakePhrase();
-        } else {
+        } else if (!this.isPaused) {
           this.log.appendLine('[VTP] VAD: silence detected — auto-stopping.');
           this._vadStop = true;  // mark so stopRecording knows to auto-restart
           this.send({ type: 'vadAutoStop' });
-          this.stopRecording();
+          void this.stopRecording();
         }
       };
 
@@ -183,6 +186,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
       // ── Live transcript via 2-second chunks ─────────────────────────────
 
+      // Reset ALL state for the new session — prevents stale isPaused / _stopping
+      // from a previous send or auto-pause race bleeding into this session.
+      this.isPaused           = false;
+      this._stopping          = false;
       this.interimTranscript  = '';
       this._chunkQueue        = Promise.resolve();
       this._sendTriggerFired  = false;
@@ -196,7 +203,21 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         );
       };
 
-      await this.capture.startChunked(2);
+      this.capture.onChunkSkipped = () => {
+        // Chunk was < 2000 bytes — mic is too quiet or muted.
+        this.log.appendLine('[VTP] Chunk skipped — audio too quiet (check mic volume).');
+      };
+
+      this.capture.onFfmpegLog = (line) => {
+        // Surface errors and warnings from FFmpeg to the output channel.
+        // Filter out normal progress lines (frame=, size=, time=, etc.).
+        if (/error|warning|cannot|failed|invalid|no such|unable|permission/i.test(line) &&
+            !/^\s*(frame|fps|size|time|bitrate|speed|Stream|encoder|Press)/.test(line)) {
+          this.log.appendLine(`[VTP] FFmpeg: ${line}`);
+        }
+      };
+
+      await this.capture.startChunked(3);
       this.send({ type: 'recordingStarted' });
       this.log.appendLine('[VTP] Recording started (chunked mode — live transcript active).');
     } catch (err) {
@@ -207,10 +228,13 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private async stopRecording(): Promise<void> {
-    if (!this.capture.isRecording()) {
+    // Guard against concurrent calls (e.g. send trigger fires, then VAD fires
+    // 200ms later while stopChunked is still awaiting FFmpeg close).
+    if (this._stopping || !this.capture.isRecording()) {
       this.send({ type: 'recordingStopped' });
       return;
     }
+    this._stopping = true;
 
     this.log.appendLine('[VTP] Stopping recording...');
     this.send({ type: 'recordingStopped' });
@@ -223,13 +247,24 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       await this._chunkQueue;
 
       const raw = this.interimTranscript.trim();
-      // Strip any [SILENCE] / [ SILENCE ] tokens that leaked through chunk filter
-      const finalText = raw.replace(/\[\s*SILENCE\s*\]/gi, '').replace(/\s{2,}/g, ' ').trim();
+      // Strip ALL [bracketed] tokens — Gemini uses brackets ONLY for non-speech
+      // annotations ([ chewing ], [SOUND], [SILENCE], [ 0m0s ], etc.).
+      // Real transcribed words never appear in brackets.
+      const finalText = raw.replace(/\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
       this.interimTranscript = '';
 
       if (!finalText) {
         this.log.appendLine('[VTP] No speech detected.');
-        if (this._vadStop) { this._vadStop = false; void this.startRecording(); }
+        if (this._vadStop) {
+          this._vadStop = false;
+          // No speech on a VAD stop = mic is muted or ambient silence.
+          // Auto-pause instead of restarting endlessly (restart would reset
+          // the 15s extended-silence timer and auto-pause would never fire).
+          this.log.appendLine('[VTP] VAD stop with no speech — entering auto-pause.');
+          this.isPaused = true;
+          this.send({ type: 'autoPaused' });
+          void this.checkForWakePhrase();
+        }
         return;
       }
 
@@ -246,6 +281,8 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       const msg = err instanceof Error ? err.message : String(err);
       this.log.appendLine(`[VTP] Stop/transcribe error: ${msg}`);
       this.send({ type: 'error', message: `Recording error: ${msg}` });
+    } finally {
+      this._stopping = false;
     }
   }
 
@@ -269,32 +306,42 @@ export class VTPPanel implements vscode.WebviewViewProvider {
    */
   private async resumeRecording(): Promise<void> {
     this.isPaused = false;
-    this.log.appendLine('[VTP] Resumed.');
-    // If FFmpeg died while paused, restart it
-    if (!this.capture.isRecording()) {
-      await this.startRecording();
+    this.log.appendLine('[VTP] Resumed — restarting to re-wire VAD callbacks.');
+    // Always stop + restart: checkForWakePhrase detaches onSilenceDetected and
+    // onExtendedSilence. Without a full restart those callbacks stay null and
+    // auto-pause can never fire again.
+    if (this.capture.isRecording()) {
+      await this.capture.stopChunked();
     }
+    await this.startRecording();
     this.send({ type: 'resumed' });
   }
 
   /**
    * Wake-phrase monitor loop (runs when isPaused=true).
    *
-   * WHY fixed 3s window instead of silence detection:
+   * WHY fixed 5s window instead of silence detection:
    * DirectShow on Windows takes 1–2s to initialise. With silence-detection,
    * the user says "resume" during FFmpeg's init window → we capture silence.
-   * Recording for a guaranteed 3s window gives FFmpeg time to init AND
-   * captures the phrase reliably.
+   * 5s window gives FFmpeg ~1.5s to init and still leaves ~3.5s of real capture.
    */
   private async checkForWakePhrase(): Promise<void> {
+    // ── Preserve transcript before stopping ──────────────────────────────────
+    // interimTranscript holds everything said since last recording start.
+    // stopChunked() discards remaining segments — save to promptBuffer first.
+    const savedTranscript = this.interimTranscript
+      .replace(/\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
+    if (savedTranscript) {
+      this.promptBuffer += (this.promptBuffer ? ' ' : '') + savedTranscript;
+      this.send({ type: 'transcriptResult', text: this.promptBuffer });
+      this.log.appendLine(`[VTP] Saved to buffer before pause: "${savedTranscript}"`);
+    }
+    this.interimTranscript = '';
+
     // ── Stop chunked recording before entering single-file wake monitor ───────
-    // In chunked mode, capture.stop() returns null (no tempFile) so start() is
-    // a no-op and the loop spins forever while the chunked proc keeps running.
-    // We must kill the chunked proc explicitly first.
-    this.capture.onChunkReady = null;           // stop processing new chunks
-    await this._chunkQueue;                     // drain in-flight transcriptions
-    await this.capture.stopChunked();           // kill FFmpeg + cleanup segments
-    // ─────────────────────────────────────────────────────────────────────────
+    this.capture.onChunkReady = null;   // stop processing new chunks
+    await this._chunkQueue;             // drain in-flight transcriptions
+    await this.capture.stopChunked();   // kill FFmpeg + cleanup segments
 
     if (!this.isPaused) return;
 
@@ -310,7 +357,16 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     while (this.isPaused) {
       try {
         await this.capture.start();                            // single-file mode
-        await new Promise<void>((r) => setTimeout(r, 3000));  // 3s listen window
+
+        // DirectShow on Windows needs ~400ms to initialise fully.
+        // Keep this short — users say "resume" immediately after the prompt
+        // and a long dead-zone means the word is swallowed every iteration.
+        await new Promise<void>((r) => setTimeout(r, 400));    // short init wait
+        if (!this.isPaused) { await this.capture.stop(); break; }
+        this.log.appendLine('[VTP] Wake monitor ready — say "resume", "continue", or "I\'m back" now...');
+        this.send({ type: 'wakeReady' }); // lets the UI show a "listening" flash
+
+        await new Promise<void>((r) => setTimeout(r, 5000));   // 5s real capture
         const result = await this.capture.stop();
 
         if (!this.isPaused) break;
@@ -318,16 +374,38 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
         const base64 = result.buffer.toString('base64');
         const genai  = new GoogleGenerativeAI(apiKey);
-        const model  = genai.getGenerativeModel({
-          model: 'gemini-2.5-flash',
-          systemInstruction:
-            'Transcribe the audio exactly as spoken. Output ONLY the spoken words. If there is no speech at all, output exactly: [SILENCE]',
-        });
-        const res  = await model.generateContent([
-          { inlineData: { mimeType: result.mimeType, data: base64 } },
-          'Transcribe the audio.',
-        ]);
-        const text = res.response.text().trim().toLowerCase();
+
+        // Cascade: 2.5-flash → 2.5-flash-lite → 1.5-flash. Catches 5xx and deprecated 404s.
+        const WAKE_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-1.5-flash'];
+        let wakeRaw = '';
+        for (const modelName of WAKE_MODELS) {
+          try {
+            const model = genai.getGenerativeModel({
+              model: modelName,
+              systemInstruction:
+                'Transcribe the audio exactly as spoken. Output ONLY the spoken words. If there is no speech at all, output exactly: [SILENCE]',
+              generationConfig: { temperature: 0 },
+            });
+            const res = await model.generateContent([
+              { inlineData: { mimeType: result.mimeType, data: base64 } },
+              'Transcribe the audio.',
+            ]);
+            wakeRaw = res.response.text().trim();
+            break;
+          } catch (e) {
+            const s = String(e);
+            if (s.includes('503') || s.includes('500') || s.includes('404') ||
+                s.includes('overloaded') || s.includes('high demand') ||
+                s.includes('Internal error') || s.includes('Service Unavailable') ||
+                s.includes('no longer available')) {
+              continue;
+            }
+            throw e;
+          }
+        }
+        const clean = this.sanitizeTranscription(wakeRaw);
+        if (!clean) continue; // all-noise response — skip without logging
+        const text = clean.toLowerCase();
         this.log.appendLine(`[VTP] Wake monitor heard: "${text}"`);
 
         if (/\b(resume|continue|start|wake up|keep going|i'?m back|listen|go|activate|hey vtp)\b/.test(text)) {
@@ -340,6 +418,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         }
       } catch (err) {
         this.log.appendLine(`[VTP] Wake monitor error: ${this.formatError(err)}`);
+        this.capture.kill(); // ensure no orphaned proc before next loop iteration
         await new Promise((r) => setTimeout(r, 500));
       }
     }
@@ -349,11 +428,40 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   // ─── Transcription ────────────────────────────────────────────────────────
 
   /**
-   * Transcribes a single 2-second audio chunk and appends it to interimTranscript.
+   * Returns true only if the WAV buffer contains audio energy above the voice threshold.
+   * Prevents sending silent/noisy chunks to Gemini, which would cause hallucination.
+   * WAV PCM is 16-bit LE starting at byte 44. Threshold ~800 on a 0–32767 scale.
+   */
+  private _hasVoiceEnergy(buf: Buffer, threshold = 800): boolean {
+    const PCM_OFFSET = 44; // standard WAV header size
+    if (buf.length <= PCM_OFFSET + 2) return false;
+    let sumSq = 0;
+    let count = 0;
+    for (let i = PCM_OFFSET; i + 1 < buf.length; i += 2) {
+      const sample = buf.readInt16LE(i);
+      sumSq += sample * sample;
+      count++;
+    }
+    if (count === 0) return false;
+    const rms = Math.sqrt(sumSq / count);
+    return rms >= threshold;
+  }
+
+  /**
+   * Transcribes a single 3-second audio chunk and appends it to interimTranscript.
    * Called serially via _chunkQueue so ordering is preserved.
    */
   private async processLiveChunk(buffer: Buffer, mimeType: string): Promise<void> {
-    if (buffer.length < 4096) return; // too small — silence or noise
+    if (buffer.length < 4096) return; // too small — partial/empty segment
+
+    // ── Local energy gate ─────────────────────────────────────────────────────
+    // Check PCM RMS BEFORE calling Gemini. If the chunk is quiet (background
+    // noise, silence, fan, etc.) Gemini will hallucinate developer content
+    // instead of outputting [SILENCE]. Gating locally is instant and free.
+    if (!this._hasVoiceEnergy(buffer)) {
+      return; // silent chunk — discard without API call
+    }
+    // ──────────────────────────────────────────────────────────────────────────
 
     const apiKey = await this.secretManager.getApiKey();
     if (!apiKey) return;
@@ -361,18 +469,48 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     try {
       const base64 = buffer.toString('base64');
       const genai  = new GoogleGenerativeAI(apiKey);
-      const model  = genai.getGenerativeModel({
-        model: 'gemini-2.5-flash',
-        systemInstruction:
-          'Transcribe the audio exactly as spoken. Output ONLY the spoken words. If there is no speech, output exactly: [SILENCE]',
-      });
-      const res  = await model.generateContent([
-        { inlineData: { mimeType, data: base64 } },
-        'Transcribe the audio.',
-      ]);
-      const raw  = res.response.text().trim();
-      const text = this.sanitizeTranscription(raw);
+      const sysInstruction =
+        'You are transcribing audio from a software developer dictating code requirements. ' +
+        'Transcribe ONLY clearly audible spoken words exactly as heard. ' +
+        'Preserve technical terms, framework names, and developer jargon verbatim. ' +
+        'IMPORTANT: If the audio is quiet, noisy, unclear, or you cannot make out distinct words, ' +
+        'you MUST output exactly: [SILENCE] — never guess or generate plausible content.';
 
+      // Cascade: 2 active stable models as of April 2026.
+      // 2.0-flash + 1.5-flash are deprecated/removed. 2.5-flash → 2.5-flash-lite.
+      const CHUNK_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+      let raw: string | null = null;
+      for (const modelName of CHUNK_MODELS) {
+        try {
+          const model = genai.getGenerativeModel({
+            model: modelName,
+            systemInstruction: sysInstruction,
+            generationConfig: { temperature: 0 }, // suppress hallucination on quiet/background audio
+          });
+          const res = await model.generateContent([
+            { inlineData: { mimeType, data: base64 } },
+            'Transcribe the audio.',
+          ]);
+          raw = res.response.text().trim();
+          break;
+        } catch (e) {
+          const s = String(e);
+          if (s.includes('503') || s.includes('500') || s.includes('404') ||
+              s.includes('overloaded') || s.includes('high demand') ||
+              s.includes('Internal error') || s.includes('Service Unavailable') ||
+              s.includes('no longer available')) {
+            continue; // try next model immediately
+          }
+          throw e;
+        }
+      }
+
+      if (raw === null) {
+        this.log.appendLine('[VTP] All models busy — chunk skipped.');
+        return;
+      }
+
+      const text = this.sanitizeTranscription(raw);
       if (!text || /^\[\s*SILENCE\s*\]$/i.test(text)) return;
 
       this.interimTranscript = this.interimTranscript
@@ -384,7 +522,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.log.appendLine(`[VTP] Live chunk: "${text}"`);
 
       // Detect send trigger in accumulated text — auto-stop without user clicking
-      // Use void (fire-and-forget) so we don't deadlock the chunk queue
       if (!this._sendTriggerFired && this._hasSendTrigger(this.interimTranscript)) {
         this._sendTriggerFired = true;
         this._restartAfterSend = true;
@@ -393,7 +530,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         void this.stopRecording();
       }
     } catch (err) {
-      // Non-fatal: skip chunk on error, don't break the queue
       this.log.appendLine(`[VTP] Chunk transcription error: ${this.formatError(err)}`);
     }
   }
@@ -462,8 +598,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Strips leaked system prompt text from a Gemini transcription response.
-   * The model occasionally echoes back instruction text when audio is ambiguous.
+   * Strips sound annotations and leaked system prompt text from a Gemini
+   * transcription response.
+   *
+   * Gemini uses [brackets] ONLY for non-speech content:
+   *   [ chewing ]  [ RATTLE ]  [SOUND]  [SILENCE]  [ 0m0s ]  [NO SPEECH]
+   * Real spoken words are NEVER inside brackets, so we strip ALL [...] tokens.
    */
   private sanitizeTranscription(raw: string): string {
     const LEAK_MARKERS = [
@@ -472,12 +612,16 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       'If no speech, output an empty string',
       'You are a transcription service',
       'Transcribe the audio.',
+      'transcribe the audio',  // lowercase variant Gemini sometimes returns
     ];
     let text = raw.trim();
+    // Strip ALL [bracketed] non-speech annotations in one pass
+    text = text.replace(/\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
+    // Strip leaked system-prompt text (case-insensitive search)
     for (const marker of LEAK_MARKERS) {
-      const idx = text.indexOf(marker);
+      const lower = text.toLowerCase();
+      const idx = lower.indexOf(marker.toLowerCase());
       if (idx > -1) {
-        // Take whatever was transcribed before the leaked instruction
         text = text.substring(0, idx).trim().replace(/[.,!?]+$/, '').trim();
       }
     }
@@ -487,12 +631,49 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   // ─── Intent processing ────────────────────────────────────────────────────
 
   private async onFinalTranscript(segment: string): Promise<void> {
-    // ── Fast path: plain dictation (no action keywords) ─────────────────────
-    // Only call Gemini when the text contains an explicit action trigger.
-    // Everything else goes straight to buffer — no rewriting, no API overhead.
-    const ACTION_TRIGGER = /\b(send it|send this|send the prompt|send now|submit|enhance|improve this|cancel|clear that|open terminal|run tests|open|close|execute|debug|find|search|hey vtp)\b/i;
+    // ── Local voice commands (no Gemini needed) ────────────────────────
+    if (/\bpause(\s+recording)?\b/i.test(segment)) {
+      this.log.appendLine('[VTP] Voice command: pause.');
+      this.pauseRecording();
+      void this.checkForWakePhrase();
+      return;
+    }
 
-    if (!ACTION_TRIGGER.test(segment)) {
+    // "Clear transcript", "clear the buffer", "clear that", "reset transcript", "start over"
+    if (/\b(clear(\s+the)?\s+(transcript|buffer|prompt)|clear\s+that|reset(\s+the)?\s+(transcript|buffer|prompt)|start\s+over)\b/i.test(segment)) {
+      this.promptBuffer   = '';
+      this.interimTranscript = '';
+      this.send({ type: 'transcriptResult', text: '' });
+      this.log.appendLine('[VTP] Voice command: clear transcript.');
+      return;
+    }
+
+    // ── Fast-path: send trigger already confirmed by local regex ─────────────
+    // _sendTriggerFired was set during live-chunk processing.  We already know
+    // the intent — no need to ask Gemini (avoids 30s of 503 retries).
+    if (this._sendTriggerFired) {
+      const content = this.stripSendTrigger(segment);
+      if (content) {
+        this.promptBuffer += (this.promptBuffer ? ' ' : '') + content;
+      }
+      this.log.appendLine('[VTP] SEND (local trigger — Gemini bypassed).');
+      if (!this.promptBuffer.trim()) {
+        this.send({ type: 'error', message: 'Nothing to send — say something first.' });
+      } else {
+        await this.injectRaw();
+      }
+      // Always restart for continuous listening after a triggered send.
+      this.log.appendLine('[VTP] Restarting mic after send.');
+      void this.startRecording();
+      return;
+    }
+
+    // ── Fast path: plain dictation (no action keywords) ─────────────────────
+    // Only call Gemini when text contains an explicit VTP action trigger.
+    const SEND_TRIGGER   = /\b(send it|send this|send the prompt|send this prompt|send my prompt|send now|submit this|submit the prompt)\b[.,!?\s]*$/i;
+    const ACTION_TRIGGER = /\b(enhance (this|my|the) prompt|rewrite (this|my|the) prompt|improve (this|my|the) prompt|cancel( that)?|clear( that)?|open the terminal|run (the )?tests|hey vtp)\b/i;
+
+    if (!SEND_TRIGGER.test(segment) && !ACTION_TRIGGER.test(segment)) {
       this.promptBuffer += (this.promptBuffer ? ' ' : '') + segment;
       this.send({ type: 'transcriptResult', text: this.promptBuffer });
       this.log.appendLine('[VTP] Plain dictation — added to buffer verbatim (no classification).');
@@ -602,7 +783,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
    * Used for real-time detection during live chunk transcription.
    */
   private _hasSendTrigger(text: string): boolean {
-    return /\b(send it|send the prompt|send this|send that|submit this|go ahead and send|ok send|okay send|go send|please send|just send|send message|send now|submit now)\b/i.test(text);
+    // Anchored to end-of-utterance: prevents mid-sentence matches like
+    // "we'll send the prompt from here" (has words after the trigger phrase).
+    return /\b(send it|send the prompt|send this prompt|send my prompt|send this|send that|submit this|go ahead and send|ok send|okay send|go send|please send|just send|send message|send now|submit now)\b[.,!?\s]*$/i.test(text);
   }
 
   /**
@@ -612,7 +795,8 @@ export class VTPPanel implements vscode.WebviewViewProvider {
    */
   private stripSendTrigger(segment: string): string {
     const triggers = [
-      'send the prompt', 'send it', 'ok send', 'okay send',
+      'send the prompt', 'send this prompt', 'send my prompt',
+      'send it', 'ok send', 'okay send',
       'send message', 'go ahead and send', 'submit this',
       'send this', 'send that', 'go send', 'please send', 'just send',
     ];

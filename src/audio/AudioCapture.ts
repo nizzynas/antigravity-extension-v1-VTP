@@ -28,9 +28,17 @@ export class AudioCapture {
   private _chunkIndex = 0;
   private _chunkedMode = false;
 
+  /** Resolves when the current stopChunked() call completes.
+   *  startChunked() awaits this before spawning — prevents zombie FFmpeg processes
+   *  when the caller uses fire-and-forget (void stopRecording()). */
+  private _stopInProgress: Promise<void> | null = null;
+
   onSilenceDetected: (() => void) | null = null;
   onExtendedSilence: (() => void) | null = null;
   onChunkReady: ((chunk: ChunkResult) => void) | null = null;
+  onChunkSkipped: (() => void) | null = null;
+  /** Fired with raw FFmpeg stderr lines — wire up to log channel for diagnostics */
+  onFfmpegLog: ((line: string) => void) | null = null;
 
   static async isAvailable(): Promise<boolean> {
     return new Promise((resolve) => {
@@ -58,7 +66,8 @@ export class AudioCapture {
   // ─── Single-file mode (wake monitor) ────────────────────────────────────────
 
   async start(maxSeconds = 120): Promise<void> {
-    if (this.proc) return;
+    // Kill any leftover process before starting fresh (never silently return).
+    if (this.proc) { this.kill(); }
     this._error = null;
     this._hadSpeech = false;
     this._chunkedMode = false;
@@ -93,7 +102,16 @@ export class AudioCapture {
   // ─── Chunked mode (live transcript) ─────────────────────────────────────────
 
   async startChunked(chunkSeconds = 2, maxSeconds = 300): Promise<void> {
-    if (this.proc) return;
+    // ── Serialize: wait for any in-progress stop before spawning ──────────────
+    // Without this, fire-and-forget callers (void stopRecording()) race with
+    // startRecording(), creating multiple FFmpeg processes holding the same
+    // DirectShow mic device, which causes audio corruption and zombie buildup.
+    if (this._stopInProgress) {
+      await this._stopInProgress;
+    }
+
+    // Kill any still-alive leftover (safety net)
+    if (this.proc) { this.kill(); }
     this._error = null;
     this._hadSpeech = false;
     this._chunkedMode = true;
@@ -105,12 +123,14 @@ export class AudioCapture {
     fs.mkdirSync(this._chunkDir, { recursive: true });
 
     const chunkPattern = path.join(this._chunkDir, 'chunk%03d.wav');
-    const silenceFilter = 'silencedetect=noise=-30dB:d=3.0';
+    const silenceFilter = 'silencedetect=noise=-40dB:d=5.0';
 
     let inputArgs: string[];
     if (process.platform === 'win32') {
       const device = await AudioCapture.getWindowsAudioDevice();
-      inputArgs = ['-f', 'dshow', '-i', `audio=${device}`];
+      // -rtbufsize 100M: large DirectShow buffer prevents audio glitches when
+      // the system is under load or when previous process just released the device.
+      inputArgs = ['-f', 'dshow', '-rtbufsize', '100M', '-i', `audio=${device}`];
     } else if (process.platform === 'darwin') {
       inputArgs = ['-f', 'avfoundation', '-i', ':0'];
     } else {
@@ -134,6 +154,14 @@ export class AudioCapture {
   }
 
   async stopChunked(): Promise<void> {
+    // Expose this stop as a promise so startChunked() can await it.
+    // This serializes stop→start even when the caller uses void (fire-and-forget).
+    this._stopInProgress = this._doStopChunked();
+    await this._stopInProgress;
+    this._stopInProgress = null;
+  }
+
+  private async _doStopChunked(): Promise<void> {
     if (this._chunkPollTimer) {
       clearInterval(this._chunkPollTimer);
       this._chunkPollTimer = null;
@@ -141,12 +169,18 @@ export class AudioCapture {
     this._clearExtendedTimer();
 
     if (this.proc) {
-      try { this.proc.stdin?.write('q'); } catch {}
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(() => { this.proc?.kill('SIGKILL'); resolve(); }, 3000);
-        this.proc!.on('close', () => { clearTimeout(t); resolve(); });
-      });
+      // Null proc FIRST so isRecording() returns false immediately.
+      // This prevents any VAD callback firing during the kill window from
+      // seeing an active recording and spawning a second FFmpeg.
+      const dying = this.proc;
       this.proc = null;
+      try { dying.stdin?.write('q'); } catch {}
+      await new Promise<void>((resolve) => {
+        // 1s timeout — DirectShow on Windows ignores stdin 'q', so we
+        // follow up with a hard kill rather than waiting 3s.
+        const t = setTimeout(() => { try { dying.kill('SIGKILL'); } catch {} resolve(); }, 1000);
+        dying.once('close', () => { clearTimeout(t); resolve(); });
+      });
     }
 
     // Process remaining files (final partial segment)
@@ -163,6 +197,8 @@ export class AudioCapture {
           const buffer = fs.readFileSync(file);
           if (buffer.length > 2000) {
             this.onChunkReady?.({ buffer, mimeType: 'audio/wav', index: this._chunkIndex++ });
+          } else {
+            this.onChunkSkipped?.();
           }
         } catch {}
       }
@@ -228,27 +264,42 @@ export class AudioCapture {
 
     this.proc.stderr?.on('data', (d: Buffer) => {
       const chunk = d.toString();
+
+      // Forward errors/warnings to log for diagnostics
+      for (const line of chunk.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed) this.onFfmpegLog?.(trimmed);
+      }
+
+      // silence_start = user stopped talking.
+      // Mark that real speech was present, then arm the 15s extended-silence
+      // timer — but only after _hadSpeech is already true (set by silence_end
+      // below), so the startup silence doesn't arm the timer before the user
+      // has spoken at all.
       if (/silence_start/i.test(chunk)) {
-        this._hadSpeech = true;
-        if (!this._extendedSilenceTimer) {
+        if (this._hadSpeech && !this._extendedSilenceTimer) {
           this._extendedSilenceTimer = setTimeout(() => {
             this._extendedSilenceTimer = null;
             this.onExtendedSilence?.();
           }, 15000);
         }
       }
+
+      // silence_end = user started talking again after a pause.
+      // This is the natural segment boundary used by the original VAD design.
       if (/silence_end/i.test(chunk)) {
-        this._clearExtendedTimer();
-        if (this._hadSpeech) this.onSilenceDetected?.();
+        this._hadSpeech = true;      // confirmed: mic is live and user spoke
+        this._clearExtendedTimer(); // user talking — cancel any pending auto-pause
+        this.onSilenceDetected?.(); // signal VTPPanel to process this segment
       }
     });
 
-    this.proc.on('error', (e) => { this._error = e.message; });
-    this.proc.on('close', () => { this._clearExtendedTimer(); });
+    this.proc.on('error', (e) => { this._error = e.message; this.onFfmpegLog?.(`FFmpeg process error: ${e.message}`); });
+    this.proc.on('close', (code) => { this._clearExtendedTimer(); if (code && code !== 255) this.onFfmpegLog?.(`FFmpeg exited with code ${code}`); });
   }
 
   private async _buildArgs(outFile: string, maxSeconds: number): Promise<string[]> {
-    const silenceFilter = 'silencedetect=noise=-30dB:d=3.0';
+    const silenceFilter = 'silencedetect=noise=-40dB:d=3.0';
     const common = ['-ar', '16000', '-ac', '1', '-af', silenceFilter, '-y'];
     if (process.platform === 'win32') {
       const device = await AudioCapture.getWindowsAudioDevice();
