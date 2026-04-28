@@ -58,6 +58,41 @@
       <div id="transcript-box" class="transcript-box">Your speech will appear here...</div>
     </div>
 
+    <!-- Glossary -->
+    <div class="card glossary-card">
+      <div class="card-label">🗂 Voice Commands</div>
+      <table class="glossary-table">
+        <thead>
+          <tr><th>Say</th><th>What happens</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>[just talk]</code></td>
+            <td>Appends to prompt. Stop and record again to continue.</td>
+          </tr>
+          <tr>
+            <td><code>send it</code> / <code>send the prompt</code></td>
+            <td>Copies prompt to clipboard &amp; focuses Antigravity. Press <kbd>Ctrl+V</kbd>.</td>
+          </tr>
+          <tr>
+            <td><code>enhance this prompt</code></td>
+            <td>Rewrites prompt with Gemini for clarity &amp; detail.</td>
+          </tr>
+          <tr>
+            <td><code>cancel</code> / <code>clear that</code></td>
+            <td>Discards the current transcript buffer.</td>
+          </tr>
+          <tr>
+            <td><code>open the terminal</code> / <code>run tests</code></td>
+            <td>IDE command — runs without touching the prompt.</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="glossary-tip">
+        💡 Combine in one breath: <em>"Build a login page with OAuth. Send the prompt."</em>
+      </div>
+    </div>
+
     <!-- Commands log (hidden until a command fires) -->
     <div id="command-section" class="card hidden">
       <div class="card-label">⚡ Commands Fired</div>

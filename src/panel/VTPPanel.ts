@@ -194,23 +194,36 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
     this.log.appendLine('[VTP] Transcribing audio via Gemini...');
 
+    // Skip tiny clips — < 8 KB is < 0.5s, likely silence or accidental tap
+    if (buffer.length < 8192) {
+      this.log.appendLine(`[VTP] Audio too short (${buffer.length} bytes) — skipping.`);
+      return;
+    }
+
     const base64 = buffer.toString('base64');
     try {
       const genai = new GoogleGenerativeAI(apiKey);
-      const model = genai.getGenerativeModel({ model: 'gemini-2.5-flash' });
+      // Use systemInstruction to separate the instruction from the audio data.
+      // Inline text instructions can get echoed back into the transcription output.
+      const model = genai.getGenerativeModel({
+        model: 'gemini-2.5-flash',
+        systemInstruction: 'You are a transcription service. Transcribe the audio exactly as spoken. Output ONLY the spoken words with no commentary, preamble, or system text. If there is no speech, output exactly: [SILENCE]',
+      });
 
       const result = await this.withRetry(() =>
         model.generateContent([
           { inlineData: { mimeType, data: base64 } },
-          'Transcribe this audio exactly as spoken. Output only the transcription, nothing else. If no speech, output an empty string.',
+          'Transcribe the audio.',
         ]),
       );
 
-      const text = result.response.text().trim();
+      const raw = result.response.text().trim();
+      const text = this.sanitizeTranscription(raw);
       this.log.appendLine(`[VTP] Transcription: "${text}"`);
 
-      if (!text) {
-        this.send({ type: 'error', message: 'No speech detected — try again.' });
+      // Silently skip silence or empty results — no error shown to user
+      if (!text || text === '[SILENCE]') {
+        this.log.appendLine('[VTP] No speech detected — skipping.');
         return;
       }
 
@@ -221,6 +234,29 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.log.appendLine(`[VTP] Transcription failed: ${msg}`);
       this.send({ type: 'error', message: `Transcription failed: ${msg}` });
     }
+  }
+
+  /**
+   * Strips leaked system prompt text from a Gemini transcription response.
+   * The model occasionally echoes back instruction text when audio is ambiguous.
+   */
+  private sanitizeTranscription(raw: string): string {
+    const LEAK_MARKERS = [
+      'Transcribe this audio exactly as spoken',
+      'Output only the transcription',
+      'If no speech, output an empty string',
+      'You are a transcription service',
+      'Transcribe the audio.',
+    ];
+    let text = raw.trim();
+    for (const marker of LEAK_MARKERS) {
+      const idx = text.indexOf(marker);
+      if (idx > -1) {
+        // Take whatever was transcribed before the leaked instruction
+        text = text.substring(0, idx).trim().replace(/[.,!?]+$/, '').trim();
+      }
+    }
+    return text;
   }
 
   // ─── Intent processing ────────────────────────────────────────────────────
@@ -243,15 +279,48 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
       switch (result.type) {
         case 'PROMPT_CONTENT':
-          this.promptBuffer += (this.promptBuffer ? ' ' : '') + result.content;
+          if (result.content) {
+            this.promptBuffer += (this.promptBuffer ? ' ' : '') + result.content;
+            this.send({ type: 'transcriptResult', text: this.promptBuffer });
+          }
           break;
+
         case 'COMMAND': {
+          // COMMAND doesn't touch the prompt buffer
           const desc = await this.commandExecutor!.execute(result.commandIntent ?? segment);
           this.send({ type: 'commandFired', description: desc });
           break;
         }
-        case 'SEND':   await this.elaborateAndInject(); break;
-        case 'CANCEL': this.promptBuffer = ''; break;
+
+        case 'ENHANCE':
+          // LLM may have extracted content said alongside the enhance trigger —
+          // e.g. "enhance this: add auth support" → content = "add auth support"
+          if (result.content) {
+            this.promptBuffer += (this.promptBuffer ? ' ' : '') + result.content;
+          }
+          await this.elaborateAndShow();
+          break;
+
+        case 'SEND': {
+          // LLM extracts content spoken before/alongside the send trigger —
+          // e.g. "build a login page, send it" → content = "build a login page"
+          if (result.content) {
+            this.promptBuffer += (this.promptBuffer ? ' ' : '') + result.content;
+            this.log.appendLine(`[VTP] SEND with inline content: "${result.content}"`);
+          }
+          if (!this.promptBuffer.trim()) {
+            this.send({ type: 'error', message: 'Nothing to send — say something first.' });
+          } else {
+            await this.injectRaw();
+          }
+          break;
+        }
+
+        case 'CANCEL':
+          this.promptBuffer = '';
+          this.send({ type: 'transcriptResult', text: '' });
+          break;
+
       }
     } catch (err) {
       const msg = this.formatError(err);
@@ -267,8 +336,40 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.send({ type: 'injected' });
   }
 
-  private async elaborateAndInject(): Promise<void> {
-    if (!this.promptBuffer.trim()) return;
+  /** Voice said 'send it' — inject buffer raw, no elaboration */
+  private async injectRaw(): Promise<void> {
+    const prompt = this.promptBuffer.trim();
+    this.log.appendLine(`[VTP] Injecting raw buffer (${prompt.length} chars).`);
+    await this.chatInjector.inject(prompt);
+    this.promptBuffer = '';
+    this.send({ type: 'injected' });
+  }
+
+  /**
+   * Strips common "send" trigger phrases from a segment so the remaining
+   * content can be used as the prompt when buffer is empty.
+   * e.g. "This is a test. Send the prompt." → "This is a test."
+   */
+  private stripSendTrigger(segment: string): string {
+    const triggers = [
+      'send the prompt', 'send it', 'ok send', 'okay send',
+      'send message', 'go ahead and send', 'submit this',
+      'send this', 'send that', 'go send', 'please send', 'just send',
+    ];
+    let text = segment.trim();
+    for (const trigger of triggers) {
+      text = text.replace(new RegExp(`[.,!?]?\\s*${trigger}[.,!?]?$`, 'gi'), '').trim();
+    }
+    return text;
+  }
+
+
+  /** Voice said 'enhance prompt' — elaborate then surface in panel for review */
+  private async elaborateAndShow(): Promise<void> {
+    if (!this.promptBuffer.trim()) {
+      this.send({ type: 'error', message: 'Nothing to enhance — say something first.' });
+      return;
+    }
 
     const apiKey = await this.secretManager.getApiKey();
     if (!apiKey) return;
@@ -286,7 +387,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         this.promptElaborator!.elaborate(this.promptBuffer, context, conversation),
       );
 
-      this.promptBuffer = '';
+      this.promptBuffer = elaborated;
       this.send({ type: 'elaborated', prompt: elaborated });
     } catch (err) {
       const msg = this.formatError(err);

@@ -1,67 +1,80 @@
 import * as vscode from 'vscode';
 
 /**
- * Injects the final elaborated prompt into the Antigravity chat.
+ * Injects the final prompt into Antigravity chat.
  *
- * Tries Antigravity's native command first, then clipboard + focus fallback.
+ * Strategy:
+ *  1. Focus the Antigravity agent side panel (non-destructive — never opens a new chat)
+ *  2. Write prompt to clipboard
+ *  3. Show a brief toast: "Prompt copied — Ctrl+V to paste"
+ *
+ * NOTE: VS Code sandboxing prevents any extension from writing directly into
+ * another extension's webview input. Clipboard is the only reliable bridge.
+ *
+ * The command `antigravity.sendPromptToAgentPanel` is intentionally skipped —
+ * it does NOT accept a plain string argument and sends terminal/context
+ * references instead of the prompt text.
  */
 export class ChatInjector {
-  /** Cached Antigravity command, discovered once per session */
-  private antigravityCommand: string | null | undefined = undefined;
+  private didLogCommands = false;
 
   async inject(prompt: string): Promise<void> {
-    const cmd = await this.findAntigravityCommand();
-
-    if (cmd) {
-      try {
-        await vscode.commands.executeCommand(cmd, prompt);
-        return;
-      } catch {
-        // Command found but failed — fall through to clipboard
-      }
+    // Log Antigravity commands once per session (for debugging/future wiring)
+    if (!this.didLogCommands) {
+      this.didLogCommands = true;
+      await this.logAntigravityCommands();
     }
 
-    await this.clipboardFallback(prompt);
-  }
-
-  private async findAntigravityCommand(): Promise<string | null> {
-    if (this.antigravityCommand !== undefined) {
-      return this.antigravityCommand;
-    }
-
-    const all = await vscode.commands.getCommands(true);
-    const candidate = all.find(
-      (c) =>
-        c.toLowerCase().includes('antigravity') &&
-        (c.toLowerCase().includes('insert') ||
-          c.toLowerCase().includes('chat') ||
-          c.toLowerCase().includes('send') ||
-          c.toLowerCase().includes('prompt')),
-    );
-
-    this.antigravityCommand = candidate ?? null;
-    return this.antigravityCommand;
-  }
-
-  private async clipboardFallback(prompt: string): Promise<void> {
+    await this.focusAntigravityPanel();
     await vscode.env.clipboard.writeText(prompt);
 
     const action = await vscode.window.showInformationMessage(
-      'VTP: Prompt copied to clipboard — paste it into Antigravity chat.',
-      'Open Chat Panel',
+      '⚡ VTP: Prompt copied — press Ctrl+V to paste into Antigravity.',
+      'Copy Again',
     );
 
-    if (action === 'Open Chat Panel') {
-      // Try to focus the Antigravity sidebar
-      const all = await vscode.commands.getCommands(true);
-      const focusCmd = all.find(
-        (c) =>
-          c.toLowerCase().includes('antigravity') &&
-          c.toLowerCase().includes('focus'),
-      );
-      if (focusCmd) {
-        await vscode.commands.executeCommand(focusCmd);
+    if (action === 'Copy Again') {
+      await vscode.env.clipboard.writeText(prompt);
+    }
+  }
+
+  /**
+   * Focuses the Antigravity agent side panel without opening a new chat.
+   * Uses the dedicated focus command if available.
+   */
+  private async focusAntigravityPanel(): Promise<void> {
+    // These commands focus the existing panel — they do NOT create a new chat
+    const FOCUS_COMMANDS = [
+      'antigravity.agentSidePanel.focus',
+      'antigravity.toggleChatFocus',
+      'antigravity.openAgent',
+    ];
+
+    for (const cmd of FOCUS_COMMANDS) {
+      try {
+        await vscode.commands.executeCommand(cmd);
+        return;
+      } catch {
+        // Try next
       }
+    }
+  }
+
+  /**
+   * Logs all registered Antigravity commands to the VTP Debug output channel.
+   * Useful for discovering new commands to wire in future versions.
+   */
+  private async logAntigravityCommands(): Promise<void> {
+    try {
+      const all = await vscode.commands.getCommands(true);
+      const agCmds = all.filter((c) => c.toLowerCase().startsWith('antigravity'));
+      if (agCmds.length > 0) {
+        const channel = vscode.window.createOutputChannel('VTP Debug');
+        channel.appendLine('[VTP ChatInjector] Antigravity commands found:');
+        agCmds.forEach((c) => channel.appendLine('  ' + c));
+      }
+    } catch {
+      // Non-critical
     }
   }
 }

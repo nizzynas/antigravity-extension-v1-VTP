@@ -108,7 +108,7 @@
 
       case 'recordingStopped':
         setRecording(false);
-        if (isRecording) setStatus('idle', 'Ready — press Record');
+        setStatus('idle', 'Ready — press Record');
         break;
 
       case 'transcriptResult':
@@ -149,7 +149,9 @@
       case 'error':
         spinner.classList.add('hidden');
         setStatus('idle', '⚠ ' + msg.message);
-        if (isRecording) setRecording(false);
+        // NOTE: do NOT call setRecording(false) here — only recordingStopped
+        // should change recording state. Changing it from an error creates a
+        // desync where the UI thinks it's not recording but FFmpeg still is.
         break;
     }
   });
@@ -170,8 +172,13 @@
     vadMode = !vadMode;
     btnVad.classList.toggle('active', vadMode);
     recordHint.textContent = vadMode ? 'Always-on' : 'Push to Talk';
-    if (vadMode && !isRecording) post({ type: 'startRecording' });
-    else if (!vadMode && isRecording) post({ type: 'stopRecording' });
+    if (vadMode && !isRecording) {
+      post({ type: 'startRecording' });
+    } else if (!vadMode && isRecording) {
+      // Immediately update UI so user knows we're stopping
+      setStatus('idle', 'Stopping…');
+      post({ type: 'stopRecording' });
+    }
   });
 
   btnApiKey.addEventListener('click', () => post({ type: 'openSettings' }));

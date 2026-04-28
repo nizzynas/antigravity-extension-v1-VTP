@@ -1,7 +1,7 @@
 // Shared types for the VTP extension.
 // Keep this file lean — it's the contract between all modules.
 
-export type IntentType = 'PROMPT_CONTENT' | 'COMMAND' | 'SEND' | 'CANCEL';
+export type IntentType = 'PROMPT_CONTENT' | 'COMMAND' | 'SEND' | 'ENHANCE' | 'CANCEL';
 
 export interface IntentResult {
   type: IntentType;
