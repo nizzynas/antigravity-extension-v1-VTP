@@ -3,7 +3,7 @@
   "displayName": "VTP — Voice to Prompt",
   "description": "Speak your ideas, enhance with Gemini, inject into Antigravity — a real-time voice-to-prompt coding assistant for VS Code.",
   "version": "0.1.0",
-  "publisher": "vtp",
+  "publisher": "nizzynas",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/nizzynas/antigravity-extension-v1-VTP" },
   "homepage": "https://github.com/nizzynas/antigravity-extension-v1-VTP#readme",
