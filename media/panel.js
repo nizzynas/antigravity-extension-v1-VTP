@@ -497,20 +497,6 @@
     post({ type: 'enhancementDecision', action: 'regenerate' });
   });
 
-  btnSend.addEventListener('click', () => {
-    const prompt = promptBox.value.trim();
-    if (prompt) post({ type: 'send', prompt });
-  });
-
-  btnClear.addEventListener('click', clearAll);
-
-  btnCopy.addEventListener('click', async () => {
-    if (!promptBox.value) return;
-    await navigator.clipboard.writeText(promptBox.value);
-    const orig = btnCopy.textContent;
-    btnCopy.textContent = '✓';
-    setTimeout(() => (btnCopy.textContent = orig), 1200);
-  });
 
   // ─── Init ──────────────────────────────────────────────────────────────────
   post({ type: 'ready' });
