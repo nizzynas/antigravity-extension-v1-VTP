@@ -40,6 +40,8 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private isPaused           = false;
   private justResumed        = false;
   private interimTranscript  = '';
+  /** Active transcription engine: 'speechRecognition' | 'ffmpeg' */
+  private transcriptionMode: 'speechRecognition' | 'ffmpeg' = 'speechRecognition';
   private _chunkQueue: Promise<void> = Promise.resolve();
   private _sendTriggerFired  = false;
   private _restartAfterSend  = false;
@@ -122,6 +124,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       case 'enhancementDecision':
         await this.handleEnhancementDecision(msg.action);
         break;
+      case 'setTranscriptionMode': {
+        this.transcriptionMode = msg.mode;
+        await vscode.workspace.getConfiguration('vtp').update('transcriptionMode', msg.mode, true);
+        this.log.appendLine(`[VTP] Transcription mode → ${msg.mode}`);
+        break;
+      }
       case 'openSettings':        await this.handleOpenSettings(); break;
       case 'showInfo':            await this.showApiKeyInfo(); break;
       case 'micPermissionDenied': this.handleMicDenied(); break;
@@ -137,10 +145,13 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.log.appendLine('[VTP] Panel ready — checking dependencies and context.');
 
     const config = vscode.workspace.getConfiguration('vtp');
+    this.transcriptionMode = config.get<'speechRecognition' | 'ffmpeg'>('transcriptionMode', 'speechRecognition');
     this.send({
       type: 'settings',
       vadMode: config.get<boolean>('vadMode', false),
       language: config.get<string>('language', 'en-US'),
+      transcriptionMode: this.transcriptionMode,
+      ffmpegAvailable: this.ffmpegReady,
     });
 
     await this.sendApiKeyStatus();
@@ -175,6 +186,28 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   // ─── Audio capture ────────────────────────────────────────────────────────
 
   private async startRecording(): Promise<void> {
+    // SR mode: FFmpeg not needed for recording — webview handles it via SpeechRecognition.
+    // FFmpeg is still used for wake monitoring during pause (checkForWakePhrase).
+    if (this.transcriptionMode === 'speechRecognition') {
+      if (this.capture.isRecording()) {
+        this.log.appendLine('[VTP] Already recording (SR mode) — ignoring startRecording.');
+        return;
+      }
+      this.isPaused           = false;
+      this._stopping          = false;
+      this.interimTranscript  = '';
+      this._chunkQueue        = Promise.resolve();
+      this._sendTriggerFired  = false;
+      this._restartAfterSend  = false;
+      this._vadStop           = false;
+      this._cancelChunks      = false;
+      ++this._sessionGen;
+      this.send({ type: 'recordingStarted' });
+      this.log.appendLine('[VTP] Recording started (SR mode — Web Speech API active).');
+      return;
+    }
+
+    // ── FFmpeg mode ───────────────────────────────────────────────────────────────
     if (!this.ffmpegReady) {
       await this.checkFFmpeg();
       if (!this.ffmpegReady) return;
@@ -243,6 +276,18 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private async stopRecording(): Promise<void> {
+    // In SR mode, speech is processed utterance-by-utterance via speechFinal.
+    // There is no FFmpeg chunk queue to drain — just reset state.
+    if (this.transcriptionMode === 'speechRecognition') {
+      if (this._stopping) { this.send({ type: 'recordingStopped' }); return; }
+      this._stopping = true;
+      this.log.appendLine('[VTP] Stopping recording (SR mode)...');
+      this.send({ type: 'recordingStopped' });
+      this._stopping = false;
+      return;
+    }
+
+    // ── FFmpeg mode ───────────────────────────────────────────────────────────────
     // Only guard against concurrent calls — NOT against isRecording(), because
     // kill() may have already muted the mic before stopRecording() is called.
     if (this._stopping) {
@@ -313,6 +358,14 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private async resumeRecording(): Promise<void> {
     this.isPaused = false;
     this.log.appendLine('[VTP] Resumed — restarting to re-wire VAD callbacks.');
+    if (this.transcriptionMode === 'speechRecognition') {
+      // SR mode: no FFmpeg running during recording — just confirm resumed.
+      // Webview receives 'resumed' and restarts SpeechRecognition.
+      await this.startRecording(); // resets state flags
+      this.send({ type: 'resumed' });
+      return;
+    }
+    // FFmpeg mode: stop any running capture and restart it.
     if (this.capture.isRecording()) {
       await this.capture.stopChunked();
     }
@@ -456,9 +509,11 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   /**
    * Returns true only if the WAV buffer contains audio energy above the voice threshold.
    * Prevents sending silent/noisy chunks to Gemini, which would cause hallucination.
-   * WAV PCM is 16-bit LE starting at byte 44. Threshold ~800 on a 0–32767 scale.
+   * WAV PCM is 16-bit LE starting at byte 44. Threshold ~200 on a 0–32767 scale
+   * (~0.6% of max). Low enough to catch quiet/distant speech while still
+   * discarding pure silence and fan/HVAC noise floors.
    */
-  private _hasVoiceEnergy(buf: Buffer, threshold = 800): boolean {
+  private _hasVoiceEnergy(buf: Buffer, threshold = 200): boolean {
     const PCM_OFFSET = 44; // standard WAV header size
     if (buf.length <= PCM_OFFSET + 2) return false;
     let sumSq = 0;

@@ -59,7 +59,9 @@ export type PanelMessage =
   /** Web Speech API final utterance — one completed sentence for intent processing */
   | { type: 'speechFinal'; segment: string; committed: string }
   /** Enhancement review decision: approve keeps enhanced, reject restores original, regenerate re-elaborates */
-  | { type: 'enhancementDecision'; action: 'approve' | 'reject' | 'regenerate' };
+  | { type: 'enhancementDecision'; action: 'approve' | 'reject' | 'regenerate' }
+  /** User toggled the transcription engine in the panel UI */
+  | { type: 'setTranscriptionMode'; mode: 'speechRecognition' | 'ffmpeg' };
 
 
 /** Messages sent FROM the extension host TO the Webview */
@@ -73,7 +75,7 @@ export type ExtensionMessage =
   | { type: 'injected' }
   | { type: 'error'; message: string }
   | { type: 'contextUpdate'; workspaceName: string; conversationTitle: string }
-  | { type: 'settings'; vadMode: boolean; language: string }
+  | { type: 'settings'; vadMode: boolean; language: string; transcriptionMode: 'speechRecognition' | 'ffmpeg'; ffmpegAvailable: boolean }
   | { type: 'transcriptResult'; text: string }
   | { type: 'apiKeyStatus'; hasKey: boolean }
   | { type: 'recordingStarted' }

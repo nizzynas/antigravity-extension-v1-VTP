@@ -26,6 +26,7 @@
   const btnRecord        = document.getElementById('btn-record');
   const btnPause         = document.getElementById('btn-pause');
   const btnVad           = document.getElementById('btn-vad');
+  const btnMode          = document.getElementById('btn-mode');
   const btnApiKey        = document.getElementById('btn-apikey');
   const btnInfo          = document.getElementById('btn-info');
   const spinner          = document.getElementById('spinner');
@@ -45,6 +46,8 @@
   let isPaused       = false;
   let vadMode        = false;
   let hasApiKey      = false;
+  /** 'speechRecognition' = Web Speech API (Google STT). 'ffmpeg' = FFmpeg + Gemini. */
+  let transcriptionMode = 'speechRecognition';
   /** True while the enhance review card is visible */
   let isReviewing    = false;
   /** Saved enhanced text for approve path */
@@ -56,6 +59,27 @@
   let committedText  = '';
   /** Live interim text for the utterance currently being spoken. */
   let interimText    = '';
+
+  // ─── VAD silence timer (SR mode only) ────────────────────────────────────
+  // When vadMode is on and transcriptionMode is 'speechRecognition', arm a
+  // timer every time a speech result fires. If 8s pass with no new results,
+  // auto-pause (same behaviour as FFmpeg silence detection).
+  let srVadTimer = null;
+  const SR_VAD_TIMEOUT_MS = 8000;
+
+  function armSrVadTimer() {
+    if (!vadMode || transcriptionMode !== 'speechRecognition') return;
+    if (srVadTimer) clearTimeout(srVadTimer);
+    srVadTimer = setTimeout(() => {
+      if (isRecording && !isPaused) {
+        post({ type: 'pauseRecording' });
+      }
+    }, SR_VAD_TIMEOUT_MS);
+  }
+
+  function clearSrVadTimer() {
+    if (srVadTimer) { clearTimeout(srVadTimer); srVadTimer = null; }
+  }
 
   // ─── Web Speech API setup ──────────────────────────────────────────────────
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -83,6 +107,9 @@
     };
 
     r.onresult = (event) => {
+      // Reset VAD silence timer on every speech event (SR mode + vadMode)
+      armSrVadTimer();
+
       // Rebuild interimText from the latest results array
       let interim = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -141,22 +168,33 @@
 
   function startRecognition() {
     intentionalStop = false;
+
+    if (transcriptionMode === 'ffmpeg') {
+      // FFmpeg mode: Web Speech API not used — extension host starts FFmpeg
+      recognition = null;
+      post({ type: 'startRecording' });
+      return;
+    }
+
+    // SR mode: Web Speech API handles transcription
     recognition = buildRecognition();
     if (!recognition) {
-      // Fallback: no Web Speech API — tell extension host to use FFmpeg/Gemini
+      // No Web Speech API in this browser — fall back to FFmpeg
       post({ type: 'startRecording' });
       return;
     }
     try {
       recognition.start();
-      post({ type: 'startRecording' }); // tells host to start FFmpeg for wake-monitor + VAD
+      post({ type: 'startRecording' }); // tells host to reset state (SR mode — no FFmpeg started)
     } catch (e) {
       post({ type: 'log', message: `[VTP/WSA] Start failed: ${e}` });
+      post({ type: 'startRecording' }); // still reset host state
     }
   }
 
   function stopRecognition(pause = false) {
     intentionalStop = true;
+    clearSrVadTimer();
     interimText = '';
     if (recognition) {
       try { recognition.stop(); } catch (_) {}
@@ -317,6 +355,15 @@
 
   function post(msg) { vscode.postMessage(msg); }
 
+  function updateModeButton() {
+    const isSR = transcriptionMode === 'speechRecognition';
+    btnMode.textContent = isSR ? '🌐 SR' : '🔧 FFM';
+    btnMode.title = isSR
+      ? 'Engine: Web Speech API (Google STT) — click to switch to FFmpeg+Gemini'
+      : 'Engine: FFmpeg + Gemini — click to switch to Web Speech API';
+    btnMode.classList.toggle('active', !isSR); // highlight when in FFmpeg mode (non-default)
+  }
+
   // ─── Messages from extension host ──────────────────────────────────────────
 
   window.addEventListener('message', (event) => {
@@ -326,6 +373,10 @@
       case 'settings':
         vadMode = msg.vadMode;
         recognitionLanguage = msg.language || 'en-US';
+        if (msg.transcriptionMode) {
+          transcriptionMode = msg.transcriptionMode;
+          updateModeButton();
+        }
         btnVad.classList.toggle('active', vadMode);
         recordHint.textContent = vadMode ? 'Auto-stops on silence' : 'Push to Talk';
         break;
@@ -376,8 +427,9 @@
 
       case 'resumed':
         setPaused(false);
-        // Restart Web Speech API recognition after resume
-        if (!recognition) startRecognition();
+        clearSrVadTimer();
+        // Restart Web Speech API recognition after resume (SR mode)
+        if (transcriptionMode === 'speechRecognition' && !recognition) startRecognition();
         break;
 
       case 'wakeReady':
@@ -487,6 +539,17 @@
 
   btnApiKey.addEventListener('click', () => post({ type: 'openSettings' }));
   btnInfo.addEventListener('click',   () => post({ type: 'showInfo' }));
+
+  btnMode.addEventListener('click', () => {
+    transcriptionMode = transcriptionMode === 'speechRecognition' ? 'ffmpeg' : 'speechRecognition';
+    updateModeButton();
+    post({ type: 'setTranscriptionMode', mode: transcriptionMode });
+    // If currently recording, restart with the new engine
+    if (isRecording && !isPaused) {
+      stopRecognition(false);
+      setTimeout(() => startRecognition(), 200);
+    }
+  });
 
   // Enhance review buttons
   btnApprove.addEventListener('click', () => post({ type: 'enhancementDecision', action: 'approve' }));
