@@ -31,6 +31,9 @@ export class AudioCapture {
   /** Resolves when the current stopChunked() call completes. */
   private _stopInProgress: Promise<void> | null = null;
 
+  /** Resolves when the last kill()'d process has actually closed. */
+  private _dyingProc: Promise<void> | null = null;
+
   /** Cached device name — enumerated once per extension lifetime to avoid 5-15s delay. */
   private static _cachedDevice: string | null = null;
 
@@ -105,16 +108,14 @@ export class AudioCapture {
   // ─── Chunked mode (live transcript) ─────────────────────────────────────────
 
   async startChunked(chunkSeconds = 2, maxSeconds = 300): Promise<void> {
-    // ── Serialize: wait for any in-progress stop before spawning ──────────────
-    // Without this, fire-and-forget callers (void stopRecording()) race with
-    // startRecording(), creating multiple FFmpeg processes holding the same
-    // DirectShow mic device, which causes audio corruption and zombie buildup.
-    if (this._stopInProgress) {
-      await this._stopInProgress;
-    }
+    // ── Serialize: wait for any in-progress stop or kill before spawning ────────
+    // Without this, fire-and-forget callers race with startRecording(), creating
+    // multiple FFmpeg processes holding the same DirectShow mic device.
+    if (this._stopInProgress) { await this._stopInProgress; }
+    if (this._dyingProc)      { await this._dyingProc; }
 
     // Kill any still-alive leftover (safety net)
-    if (this.proc) { this.kill(); }
+    if (this.proc) { this.kill(); await this._dyingProc; }
     this._error = null;
     this._hadSpeech = false;
     this._chunkedMode = true;
@@ -250,8 +251,18 @@ export class AudioCapture {
   kill(): void {
     this._clearExtendedTimer();
     if (this._chunkPollTimer) { clearInterval(this._chunkPollTimer); this._chunkPollTimer = null; }
-    try { this.proc?.kill('SIGKILL'); } catch {}
-    this.proc = null;
+    if (this.proc) {
+      const dying = this.proc;
+      this.proc = null;
+      // Track the actual process close so startChunked() can await it.
+      // Without this, a rapid kill→start cycle spawns a new FFmpeg before the
+      // old DirectShow handle is released, producing zombie audio processes.
+      this._dyingProc = new Promise<void>((resolve) => {
+        const t = setTimeout(() => { try { dying.kill('SIGKILL'); } catch {} resolve(); }, 800);
+        dying.once('close', () => { clearTimeout(t); resolve(); });
+      }).finally(() => { this._dyingProc = null; });
+      try { dying.stdin?.write('q'); } catch {}
+    }
     if (this.tempFile) { try { fs.unlinkSync(this.tempFile); } catch {} this.tempFile = null; }
     this._cleanupChunkDir();
   }
@@ -272,6 +283,12 @@ export class AudioCapture {
       for (const line of chunk.split('\n')) {
         const trimmed = line.trim();
         if (trimmed) this.onFfmpegLog?.(trimmed);
+      }
+
+      // Detect mic device already in use — happens when another VS Code window
+      // (or any app) is already holding the DirectShow audio device.
+      if (/device (is )?not found|unable to open|dshow.*error|could not open|in use/i.test(chunk)) {
+        this.onFfmpegLog?.('[VTP] ⚠ Mic device busy — is VTP open in another window?');
       }
 
       // silence_start = user stopped talking (after the silence duration d=5s).

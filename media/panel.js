@@ -113,8 +113,9 @@
     r.onerror = (event) => {
       // 'no-speech' and 'aborted' are expected — don't surface as errors.
       if (event.error === 'no-speech' || event.error === 'aborted') return;
-      // 'not-allowed' = mic permission denied
+      // 'not-allowed' = mic permission denied (expected when FFmpeg is active)
       if (event.error === 'not-allowed') {
+        intentionalStop = true; // prevent onend from restarting — FFmpeg owns the mic
         post({ type: 'micPermissionDenied' });
         setStatus('idle', '⚠ Mic permission denied');
         return;
