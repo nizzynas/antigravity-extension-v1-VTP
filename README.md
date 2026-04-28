@@ -42,11 +42,11 @@ Or download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH.
 
 ### 2. Get a Gemini API Key
 
-Get a free key at [aistudio.google.com](https://aistudio.google.com/apikey).
+Get a key at [aistudio.google.com](https://aistudio.google.com/apikey) — **no credit card required**. Use the free tier (~15 req/min) or a pay-as-you-go plan for higher limits.
 
 ### 3. Add your key to VTP
 
-Open the VTP panel from the Activity Bar, click **KEY**, and paste your Gemini API key.
+Open the VTP panel from the Activity Bar, click **KEY**, and paste your Gemini API key. It's stored in VS Code SecretStorage (your OS credential manager) — never in a file, never leaves your machine.
 
 ### 4. Start talking
 
@@ -91,4 +91,4 @@ Click the microphone button (or enable VAD for always-on mode) and start dictati
 
 ## 📄 License
 
-MIT © 2026 — [View on GitHub](https://github.com/banko-dev/vtp-voice-prompt)
+MIT © 2026 — [View on GitHub](https://github.com/nizzynas/antigravity-extension-v1-VTP)
