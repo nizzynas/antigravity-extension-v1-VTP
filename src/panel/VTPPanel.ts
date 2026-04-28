@@ -16,10 +16,6 @@ import { PromptElaborator } from '../pipeline/PromptElaborator';
 import { ChatInjector } from '../pipeline/ChatInjector';
 import { CommandRegistry } from '../commands/CommandRegistry';
 
-/**
- * Manages the VTP Webview sidebar panel.
- * Acts as the bridge between the Webview UI and the processing pipeline.
- */
 export class VTPPanel implements vscode.WebviewViewProvider {
   public static readonly viewId = 'vtp.panel';
 
@@ -40,6 +36,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly secretManager: SecretManager,
+    private readonly log: vscode.OutputChannel,
   ) {
     const workspaceRoot =
       vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
@@ -50,77 +47,99 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.conversationMatcher = new ConversationMatcher(contextDepth);
     this.commandRegistry = new CommandRegistry(workspaceRoot);
     this.commandRegistry.initialize();
+
+    this.log.appendLine(`[VTP] Panel created. Workspace root: ${workspaceRoot ?? 'none'}`);
   }
 
-  /** Called by VS Code when the webview panel becomes visible */
   async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
     this.view = webviewView;
+    this.log.appendLine('[VTP] Webview resolved — panel opening.');
 
     webviewView.webview.options = {
       enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.extensionUri, 'media'),
-      ],
+      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')],
     };
 
     webviewView.webview.html = this.buildHtml(webviewView.webview);
-    webviewView.webview.onDidReceiveMessage(
-      (msg: PanelMessage) => this.handleMessage(msg),
+    webviewView.webview.onDidReceiveMessage((msg: PanelMessage) =>
+      this.handleMessage(msg),
     );
   }
 
   // ─── Message handler ──────────────────────────────────────────────────────
 
   private async handleMessage(msg: PanelMessage): Promise<void> {
+    this.log.appendLine(`[VTP] Message received: ${msg.type}`);
+
     switch (msg.type) {
       case 'ready':
         await this.onPanelReady();
         break;
-
       case 'transcript':
-        if (msg.isFinal) {
-          await this.onFinalTranscript(msg.segment);
-        }
+        if (msg.isFinal) await this.onFinalTranscript(msg.segment);
         break;
-
       case 'send':
         await this.onSend(msg.prompt);
         break;
-
       case 'cancel':
+        this.log.appendLine('[VTP] Buffer cleared by user.');
         this.promptBuffer = '';
+        break;
+      case 'openSettings':
+        await vscode.commands.executeCommand('vtp.setApiKey');
+        break;
+      case 'showInfo':
+        await this.showApiKeyInfo();
         break;
     }
   }
 
   private async onPanelReady(): Promise<void> {
+    this.log.appendLine('[VTP] Panel ready — sending settings and refreshing context.');
     const config = vscode.workspace.getConfiguration('vtp');
     this.send({
       type: 'settings',
       vadMode: config.get<boolean>('vadMode', false),
       language: config.get<string>('language', 'en-US'),
     });
-
-    // Refresh context in the background
     this.refreshContext();
   }
 
+  private async showApiKeyInfo(): Promise<void> {
+    const action = await vscode.window.showInformationMessage(
+      'VTP uses the Gemini API. Get a free key at Google AI Studio — it takes 30 seconds.',
+      'Open Google AI Studio',
+      'Enter My Key Now',
+    );
+    if (action === 'Open Google AI Studio') {
+      vscode.env.openExternal(vscode.Uri.parse('https://aistudio.google.com/apikey'));
+    } else if (action === 'Enter My Key Now') {
+      await vscode.commands.executeCommand('vtp.setApiKey');
+    }
+  }
+
   private async onFinalTranscript(segment: string): Promise<void> {
+    this.log.appendLine(`[VTP] Final transcript segment: "${segment}"`);
+
     const apiKey = await this.secretManager.ensureApiKey();
     if (!apiKey) {
-      this.send({ type: 'error', message: 'No API key set. Use "VTP: Set Gemini API Key".' });
+      this.log.appendLine('[VTP] No API key set.');
+      this.send({ type: 'error', message: 'No API key set. Click ⚙ or run "VTP: Set Gemini API Key".' });
       return;
     }
 
     this.ensurePipeline(apiKey);
 
     const context = this.cachedContext ?? (await this.contextCollector.collect());
+    this.log.appendLine('[VTP] Classifying intent...');
+
     const result = await this.intentProcessor!.classify(
       segment,
       this.promptBuffer,
       context,
     );
 
+    this.log.appendLine(`[VTP] Intent result: ${result.type} — "${result.content || result.commandIntent || ''}"`);
     this.send({ type: 'intentResult', intent: result, buffer: this.promptBuffer });
 
     switch (result.type) {
@@ -129,38 +148,46 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         break;
 
       case 'COMMAND': {
+        this.log.appendLine(`[VTP] Executing command: "${result.commandIntent}"`);
         const description = await this.commandExecutor!.execute(
           result.commandIntent ?? segment,
         );
+        this.log.appendLine(`[VTP] Command result: ${description}`);
         this.send({ type: 'commandFired', description });
         break;
       }
 
       case 'SEND':
+        this.log.appendLine('[VTP] SEND detected — elaborating prompt.');
         await this.elaborateAndInject();
         break;
 
       case 'CANCEL':
+        this.log.appendLine('[VTP] CANCEL detected — clearing buffer.');
         this.promptBuffer = '';
         break;
     }
   }
 
   private async onSend(prompt: string): Promise<void> {
-    // User hit the Send button manually with an edited prompt
+    this.log.appendLine(`[VTP] Manual send — injecting prompt (${prompt.length} chars).`);
     await this.chatInjector.inject(prompt);
     this.promptBuffer = '';
     this.send({ type: 'injected' });
   }
 
   private async elaborateAndInject(): Promise<void> {
-    if (!this.promptBuffer.trim()) return;
+    if (!this.promptBuffer.trim()) {
+      this.log.appendLine('[VTP] Buffer empty — nothing to elaborate.');
+      return;
+    }
 
     const apiKey = await this.secretManager.getApiKey();
     if (!apiKey) return;
 
     this.ensurePipeline(apiKey);
     this.send({ type: 'elaborating' });
+    this.log.appendLine(`[VTP] Elaborating buffer: "${this.promptBuffer.slice(0, 80)}..."`);
 
     try {
       const [context, conversation] = await Promise.all([
@@ -168,35 +195,47 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         this.cachedConversation ?? this.conversationMatcher.findBestMatch(),
       ]);
 
+      this.log.appendLine(
+        `[VTP] Context: ${context.workspaceName} | Conversation: ${conversation?.title ?? 'none'}`,
+      );
+
       const elaborated = await this.promptElaborator!.elaborate(
         this.promptBuffer,
         context,
         conversation,
       );
 
+      this.log.appendLine(`[VTP] Elaboration complete (${elaborated.length} chars).`);
       this.promptBuffer = '';
       this.send({ type: 'elaborated', prompt: elaborated });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      this.log.appendLine(`[VTP] Elaboration error: ${message}`);
       this.send({ type: 'error', message: `Elaboration failed: ${message}` });
     }
   }
 
-  private async refreshContext(): Promise<void> {
-    const [context, conversation] = await Promise.all([
+  private refreshContext(): void {
+    Promise.all([
       this.contextCollector.collect(),
       this.conversationMatcher.findBestMatch(),
-    ]);
-    this.cachedContext = context;
-    this.cachedConversation = conversation;
-    this.send({
-      type: 'contextUpdate',
-      workspaceName: context.workspaceName,
-      conversationTitle: conversation?.title ?? 'No matched conversation',
+    ]).then(([context, conversation]) => {
+      this.cachedContext = context;
+      this.cachedConversation = conversation;
+      const conversationTitle = conversation?.title ?? 'No matched conversation';
+      this.log.appendLine(
+        `[VTP] Context refreshed — workspace: "${context.workspaceName}", conversation: "${conversationTitle}"`,
+      );
+      this.send({
+        type: 'contextUpdate',
+        workspaceName: context.workspaceName,
+        conversationTitle,
+      });
+    }).catch((err) => {
+      this.log.appendLine(`[VTP] Context refresh error: ${err}`);
     });
   }
 
-  /** Lazily initialise pipeline objects (avoids work before API key is set) */
   private ensurePipeline(apiKey: string): void {
     const model = vscode.workspace
       .getConfiguration('vtp')
@@ -204,16 +243,17 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
     if (!this.intentProcessor) {
       this.intentProcessor = new IntentProcessor(apiKey);
+      this.log.appendLine('[VTP] IntentProcessor initialized.');
     }
     if (!this.commandExecutor) {
       this.commandExecutor = new CommandExecutor(this.commandRegistry.getCommands());
+      this.log.appendLine('[VTP] CommandExecutor initialized.');
     }
     if (!this.promptElaborator) {
       this.promptElaborator = new PromptElaborator(apiKey, model);
+      this.log.appendLine(`[VTP] PromptElaborator initialized with model: ${model}`);
     }
   }
-
-  // ─── Helpers ──────────────────────────────────────────────────────────────
 
   private send(msg: ExtensionMessage): void {
     this.view?.webview.postMessage(msg);
@@ -227,16 +267,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       vscode.Uri.joinPath(this.extensionUri, 'media', 'panel.css'),
     );
     const nonce = this.nonce();
-
-    const htmlPath = path.join(
-      this.extensionUri.fsPath,
-      'media',
-      'panel.html',
-    );
+    const htmlPath = path.join(this.extensionUri.fsPath, 'media', 'panel.html');
     let html = fs.readFileSync(htmlPath, 'utf-8');
 
     html = html
-      .replace('{{cspNonce}}', nonce)
+      .replace(/\{\{cspSource\}\}/g, webview.cspSource)
+      .replace(/\{\{cspNonce\}\}/g, nonce)
       .replace('{{styleUri}}', styleUri.toString())
       .replace('{{scriptUri}}', scriptUri.toString());
 
@@ -244,8 +280,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private nonce(): string {
-    const chars =
-      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     return Array.from({ length: 32 }, () =>
       chars[Math.floor(Math.random() * chars.length)],
     ).join('');

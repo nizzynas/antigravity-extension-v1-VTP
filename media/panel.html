@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src {{cspNonce}} 'unsafe-inline'; script-src 'nonce-{{cspNonce}}';"
+    content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{cspNonce}}';"
   />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="{{styleUri}}" />
@@ -12,62 +12,75 @@
 </head>
 <body>
 
-  <!-- Header -->
-  <header class="vtp-header">
-    <span class="vtp-logo">🎙 VTP</span>
-    <div class="vtp-controls">
-      <button id="btn-vad" class="btn-icon" title="Toggle always-on mode">VAD</button>
-      <button id="btn-settings" class="btn-icon" title="Set API Key">⚙</button>
+  <div class="vtp-root">
+
+    <!-- Header -->
+    <header class="vtp-header">
+      <div class="vtp-brand">
+        <span class="vtp-brand-icon">🎙</span>
+        <span class="vtp-brand-name">VTP</span>
+      </div>
+      <div class="vtp-header-actions">
+        <button id="btn-info" class="btn-icon" title="How to get your API key">ℹ</button>
+        <button id="btn-settings" class="btn-icon" title="Set Gemini API Key">⚙</button>
+        <button id="btn-vad" class="btn-icon vad-toggle" title="Toggle always-on listening">
+          <span class="vad-dot"></span> VAD
+        </button>
+      </div>
+    </header>
+
+    <!-- Context badge -->
+    <div class="context-card">
+      <span class="context-icon">📂</span>
+      <div class="context-info">
+        <span id="context-workspace" class="context-workspace">Detecting...</span>
+        <span id="context-conv" class="context-conv">—</span>
+      </div>
     </div>
-  </header>
 
-  <!-- Context badge -->
-  <div class="context-bar">
-    <span class="context-label">📂</span>
-    <span id="context-text" class="context-text">Detecting workspace...</span>
-  </div>
-
-  <!-- Status -->
-  <div id="status-bar" class="status-bar status-idle">
-    <span id="status-dot" class="status-dot"></span>
-    <span id="status-text">Ready — press Record to start</span>
-  </div>
-
-  <!-- Record button -->
-  <div class="record-area">
-    <button id="btn-record" class="btn-record" title="Hold to talk (or toggle in VAD mode)">
-      <span class="mic-icon">🎙</span>
-    </button>
-    <span class="record-hint" id="record-hint">Push to Talk</span>
-  </div>
-
-  <!-- Raw transcript -->
-  <section class="section">
-    <div class="section-label">Transcript</div>
-    <div id="transcript-box" class="transcript-box">Your speech will appear here...</div>
-  </section>
-
-  <!-- Command log -->
-  <section id="command-section" class="section hidden">
-    <div class="section-label">⚡ Commands Fired</div>
-    <div id="command-log" class="command-log"></div>
-  </section>
-
-  <!-- Elaborated prompt -->
-  <section id="prompt-section" class="section hidden">
-    <div class="section-label">✏ Elaborated Prompt</div>
-    <textarea id="prompt-box" class="prompt-box" rows="8" placeholder="Gemini will elaborate your notes here..."></textarea>
-    <div class="prompt-actions">
-      <button id="btn-clear" class="btn-secondary">🗑 Clear</button>
-      <button id="btn-copy" class="btn-secondary">📋 Copy</button>
-      <button id="btn-send" class="btn-primary">▶ Send to Antigravity</button>
+    <!-- Status -->
+    <div id="status-bar" class="status-bar status-idle">
+      <span id="status-dot" class="status-dot"></span>
+      <span id="status-text">Ready — press Record</span>
     </div>
-  </section>
 
-  <!-- Elaborating spinner -->
-  <div id="spinner" class="spinner hidden">
-    <div class="spinner-ring"></div>
-    <span>Elaborating with Gemini...</span>
+    <!-- Record button -->
+    <div class="record-area">
+      <button id="btn-record" class="btn-record" title="Click to start / stop recording">
+        <span class="mic-glyph">🎙</span>
+      </button>
+      <span id="record-hint" class="record-hint">Push to Talk</span>
+    </div>
+
+    <!-- Transcript -->
+    <div class="card">
+      <div class="card-label">Transcript</div>
+      <div id="transcript-box" class="transcript-box">Your speech will appear here...</div>
+    </div>
+
+    <!-- Commands log (hidden until a command fires) -->
+    <div id="command-section" class="card hidden">
+      <div class="card-label">⚡ Commands Fired</div>
+      <div id="command-log" class="command-log"></div>
+    </div>
+
+    <!-- Elaborated prompt (hidden until elaboration runs) -->
+    <div id="prompt-section" class="card hidden">
+      <div class="card-label">✏ Elaborated Prompt</div>
+      <textarea id="prompt-box" class="prompt-box" rows="7" placeholder="Gemini will elaborate your notes here..."></textarea>
+      <div class="prompt-actions">
+        <button id="btn-clear" class="btn-ghost">🗑 Clear</button>
+        <button id="btn-copy" class="btn-ghost">📋 Copy</button>
+        <button id="btn-send" class="btn-primary">▶ Send</button>
+      </div>
+    </div>
+
+    <!-- Spinner (hidden until elaboration starts) -->
+    <div id="spinner" class="spinner hidden">
+      <div class="spinner-ring"></div>
+      <span>Elaborating with Gemini...</span>
+    </div>
+
   </div>
 
   <script nonce="{{cspNonce}}" src="{{scriptUri}}"></script>

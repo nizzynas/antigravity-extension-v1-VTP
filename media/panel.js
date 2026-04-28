@@ -3,84 +3,81 @@
 /**
  * VTP Webview Panel script.
  * Runs inside the VS Code Webview (browser context).
- * Uses the Web Speech API for transcription — no audio streaming needed.
- * Communicates with the extension host via postMessage.
+ * Uses the Web Speech API for transcription.
+ * Communicates with the extension host via acquireVsCodeApi().postMessage().
  */
 
 (function () {
-  // ─── VS Code API bridge ──────────────────────────────────────────────────
-  // @ts-ignore
   const vscode = acquireVsCodeApi();
 
   // ─── DOM refs ────────────────────────────────────────────────────────────
-  const statusBar = /** @type {HTMLElement} */ (document.getElementById('status-bar'));
-  const statusText = /** @type {HTMLElement} */ (document.getElementById('status-text'));
-  const contextText = /** @type {HTMLElement} */ (document.getElementById('context-text'));
-  const transcriptBox = /** @type {HTMLElement} */ (document.getElementById('transcript-box'));
-  const btnRecord = /** @type {HTMLButtonElement} */ (document.getElementById('btn-record'));
-  const btnVad = /** @type {HTMLButtonElement} */ (document.getElementById('btn-vad'));
-  const btnSettings = /** @type {HTMLButtonElement} */ (document.getElementById('btn-settings'));
-  const btnSend = /** @type {HTMLButtonElement} */ (document.getElementById('btn-send'));
-  const btnClear = /** @type {HTMLButtonElement} */ (document.getElementById('btn-clear'));
-  const btnCopy = /** @type {HTMLButtonElement} */ (document.getElementById('btn-copy'));
-  const promptBox = /** @type {HTMLTextAreaElement} */ (document.getElementById('prompt-box'));
-  const promptSection = /** @type {HTMLElement} */ (document.getElementById('prompt-section'));
-  const commandSection = /** @type {HTMLElement} */ (document.getElementById('command-section'));
-  const commandLog = /** @type {HTMLElement} */ (document.getElementById('command-log'));
-  const spinner = /** @type {HTMLElement} */ (document.getElementById('spinner'));
-  const recordHint = /** @type {HTMLElement} */ (document.getElementById('record-hint'));
+  const statusBar        = document.getElementById('status-bar');
+  const statusText       = document.getElementById('status-text');
+  const contextWorkspace = document.getElementById('context-workspace');
+  const contextConv      = document.getElementById('context-conv');
+  const transcriptBox    = document.getElementById('transcript-box');
+  const btnRecord        = document.getElementById('btn-record');
+  const btnVad           = document.getElementById('btn-vad');
+  const btnSettings      = document.getElementById('btn-settings');
+  const btnInfo          = document.getElementById('btn-info');
+  const btnSend          = document.getElementById('btn-send');
+  const btnClear         = document.getElementById('btn-clear');
+  const btnCopy          = document.getElementById('btn-copy');
+  const promptBox        = document.getElementById('prompt-box');
+  const promptSection    = document.getElementById('prompt-section');
+  const commandSection   = document.getElementById('command-section');
+  const commandLog       = document.getElementById('command-log');
+  const spinner          = document.getElementById('spinner');
+  const recordHint       = document.getElementById('record-hint');
 
   // ─── State ───────────────────────────────────────────────────────────────
-  let isRecording = false;
-  let vadMode = false;
-  let recognition = /** @type {SpeechRecognition|null} */ (null);
+  let isRecording  = false;
+  let vadMode      = false;
+  let recognition  = null;
   let fullTranscript = '';
-  let interimText = '';
 
-  // ─── Speech Recognition setup ────────────────────────────────────────────
+  // ─── Speech Recognition ──────────────────────────────────────────────────
 
-  function createRecognition(language = 'en-US') {
-    // @ts-ignore
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setStatus('idle', 'Speech recognition not supported in this environment.');
+  function createRecognition(language) {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setStatus('idle', 'Speech API not available in this browser.');
       return null;
     }
 
-    const rec = new SpeechRecognition();
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.lang = language;
+    const rec = new SR();
+    rec.continuous      = true;
+    rec.interimResults  = true;
+    rec.lang            = language || 'en-US';
 
-    rec.onresult = (/** @type {SpeechRecognitionEvent} */ event) => {
+    rec.onresult = (event) => {
       let interim = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        if (result.isFinal) {
-          const segment = result[0].transcript.trim();
+        const r = event.results[i];
+        if (r.isFinal) {
+          const segment = r[0].transcript.trim();
           fullTranscript += (fullTranscript ? ' ' : '') + segment;
           renderTranscript(fullTranscript, '');
-          // Send final segment to extension host for intent classification
           post({ type: 'transcript', segment, isFinal: true });
         } else {
-          interim += result[0].transcript;
+          interim += r[0].transcript;
         }
       }
-      interimText = interim;
-      renderTranscript(fullTranscript, interimText);
+      if (interim) renderTranscript(fullTranscript, interim);
+      transcriptBox.classList.add('active');
     };
 
-    rec.onerror = (/** @type {SpeechRecognitionErrorEvent} */ e) => {
+    rec.onerror = (e) => {
       if (e.error !== 'no-speech') {
-        setStatus('idle', `Mic error: ${e.error}`);
+        setStatus('idle', 'Mic error: ' + e.error);
         stopRecording();
       }
     };
 
     rec.onend = () => {
-      // In VAD mode, restart automatically unless we stopped intentionally
+      // In VAD mode keep restarting, otherwise stop
       if (vadMode && isRecording) {
-        rec.start();
+        try { rec.start(); } catch {}
       } else {
         stopRecording();
       }
@@ -98,82 +95,74 @@
     }
     isRecording = true;
     fullTranscript = '';
-    interimText = '';
     renderTranscript('', '');
     btnRecord.classList.add('recording');
-    setStatus('listening', vadMode ? 'Listening (VAD)...' : 'Recording...');
-    recordHint.textContent = vadMode ? 'Always-on' : 'Click to stop';
-    recognition.start();
+    setStatus('listening', vadMode ? 'Listening (VAD on)...' : 'Recording...');
+    recordHint.textContent = vadMode ? 'Always-on — say "OK send" to finish' : 'Click to stop';
+    try { recognition.start(); } catch {}
   }
 
   function stopRecording() {
     isRecording = false;
     btnRecord.classList.remove('recording');
-    setStatus('idle', 'Ready — press Record to start');
+    transcriptBox.classList.remove('active');
+    setStatus('idle', 'Ready — press Record');
     recordHint.textContent = vadMode ? 'Always-on' : 'Push to Talk';
-    try { recognition?.stop(); } catch { /* already stopped */ }
+    try { recognition.stop(); } catch {}
   }
 
   // ─── UI helpers ───────────────────────────────────────────────────────────
 
-  /**
-   * @param {'idle'|'listening'|'processing'|'ready'} state
-   * @param {string} text
-   */
   function setStatus(state, text) {
-    statusBar.className = `status-bar status-${state}`;
+    statusBar.className = 'status-bar status-' + state;
     statusText.textContent = text;
   }
 
-  /** @param {string} final @param {string} interim */
   function renderTranscript(final, interim) {
     transcriptBox.innerHTML =
-      (final ? `<span class="final">${escapeHtml(final)}</span>` : '') +
-      (interim ? `<span class="interim"> ${escapeHtml(interim)}</span>` : '') ||
+      (final  ? '<span class="final">'   + esc(final)  + '</span>' : '') +
+      (interim ? '<span class="interim"> ' + esc(interim) + '</span>' : '') ||
       'Your speech will appear here...';
   }
 
-  /** @param {string} text */
-  function escapeHtml(text) {
-    return text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+  function esc(t) {
+    return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  /** @param {string} text */
   function addCommandEntry(text) {
     commandSection.classList.remove('hidden');
-    const entry = document.createElement('div');
-    entry.className = 'command-entry';
-    entry.textContent = `⚡ ${text}`;
-    commandLog.appendChild(entry);
+    const el = document.createElement('div');
+    el.className = 'command-entry';
+    el.textContent = '⚡ ' + text;
+    commandLog.appendChild(el);
     commandLog.scrollTop = commandLog.scrollHeight;
   }
 
-  function showPromptSection(text = '') {
-    promptSection.classList.remove('hidden');
+  function showPromptSection(text) {
     spinner.classList.add('hidden');
+    promptSection.classList.remove('hidden');
     if (text) promptBox.value = text;
+    promptBox.focus();
   }
 
   function clearAll() {
     fullTranscript = '';
-    interimText = '';
     promptBox.value = '';
     commandLog.innerHTML = '';
     transcriptBox.innerHTML = 'Your speech will appear here...';
+    transcriptBox.classList.remove('active');
     promptSection.classList.add('hidden');
     commandSection.classList.add('hidden');
     spinner.classList.add('hidden');
-    setStatus('idle', 'Ready — press Record to start');
+    setStatus('idle', 'Ready — press Record');
     post({ type: 'cancel' });
   }
 
-  // ─── Message bus: Extension host → Webview ────────────────────────────────
+  // ─── Messages from extension host ─────────────────────────────────────────
 
-  window.addEventListener('message', (/** @type {MessageEvent} */ event) => {
+  window.addEventListener('message', (event) => {
     const msg = event.data;
+
     switch (msg.type) {
       case 'settings':
         vadMode = msg.vadMode;
@@ -183,17 +172,18 @@
         break;
 
       case 'contextUpdate':
-        contextText.textContent = `${msg.workspaceName} / ${msg.conversationTitle}`;
+        contextWorkspace.textContent = msg.workspaceName || '—';
+        contextConv.textContent      = msg.conversationTitle || '—';
         break;
 
       case 'intentResult':
-        // Update buffer display in transcript
-        setStatus('listening', 'Classified — still listening...');
+        // Keep status updated while still listening
+        if (isRecording) setStatus('listening', 'Classified — still listening...');
         break;
 
       case 'commandFired':
         addCommandEntry(msg.description);
-        setStatus('listening', 'Command fired — still listening...');
+        if (isRecording) setStatus('listening', 'Command done — still listening...');
         break;
 
       case 'elaborating':
@@ -204,8 +194,7 @@
 
       case 'elaborated':
         showPromptSection(msg.prompt);
-        setStatus('ready', 'Ready to send');
-        fullTranscript = '';
+        setStatus('ready', 'Ready — review and send');
         break;
 
       case 'injected':
@@ -215,60 +204,53 @@
 
       case 'error':
         spinner.classList.add('hidden');
-        setStatus('idle', `Error: ${msg.message}`);
+        setStatus('idle', '⚠ ' + msg.message);
         break;
     }
   });
 
-  // ─── Button event listeners ───────────────────────────────────────────────
+  // ─── Button listeners ─────────────────────────────────────────────────────
 
   btnRecord.addEventListener('click', () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
+    isRecording ? stopRecording() : startRecording();
   });
 
   btnVad.addEventListener('click', () => {
     vadMode = !vadMode;
     btnVad.classList.toggle('active', vadMode);
-    if (vadMode && !isRecording) {
-      startRecording();
-    } else if (!vadMode && isRecording) {
-      stopRecording();
-    }
+    if (vadMode && !isRecording) startRecording();
+    else if (!vadMode && isRecording) stopRecording();
   });
 
+  // ⚙ Settings — triggers the API key prompt in the extension host
   btnSettings.addEventListener('click', () => {
-    post({ type: 'send', prompt: '__vtp_open_settings__' });
-    // Extension host ignores non-prompt sends and routes this to setApiKey command
+    post({ type: 'openSettings' });
+  });
+
+  // ℹ Info — explains how to get an API key
+  btnInfo.addEventListener('click', () => {
+    post({ type: 'showInfo' });
   });
 
   btnSend.addEventListener('click', () => {
     const prompt = promptBox.value.trim();
-    if (!prompt) return;
-    post({ type: 'send', prompt });
+    if (prompt) post({ type: 'send', prompt });
   });
 
   btnClear.addEventListener('click', clearAll);
 
   btnCopy.addEventListener('click', async () => {
+    if (!promptBox.value) return;
     await navigator.clipboard.writeText(promptBox.value);
+    const orig = btnCopy.textContent;
     btnCopy.textContent = '✓ Copied';
-    setTimeout(() => (btnCopy.textContent = '📋 Copy'), 1500);
+    setTimeout(() => (btnCopy.textContent = orig), 1500);
   });
 
-  // ─── Message helper ───────────────────────────────────────────────────────
-
-  /** @param {object} msg */
-  function post(msg) {
-    vscode.postMessage(msg);
-  }
-
   // ─── Init ─────────────────────────────────────────────────────────────────
-
-  // Request settings on load
   post({ type: 'ready' });
-  recognition = createRecognition();
+  recognition = createRecognition('en-US');
+
+  function post(msg) { vscode.postMessage(msg); }
+
 })();

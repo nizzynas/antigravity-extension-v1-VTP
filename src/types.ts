@@ -46,7 +46,9 @@ export type PanelMessage =
   | { type: 'transcript'; segment: string; isFinal: boolean }
   | { type: 'send'; prompt: string }
   | { type: 'cancel' }
-  | { type: 'ready' };
+  | { type: 'ready' }
+  | { type: 'openSettings' }
+  | { type: 'showInfo' };
 
 /** Messages sent FROM the extension host TO the Webview */
 export type ExtensionMessage =
