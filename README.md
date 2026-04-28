@@ -11,8 +11,7 @@ VTP is a real-time voice-to-prompt coding assistant for VS Code. Dictate your th
 - 🎙 **Live transcription** — FFmpeg-powered audio capture with real-time streaming to Gemini, no browser mic permission required
 - 🧠 **Gemini enhancement** — say *"enhance this prompt"* and get a polished, context-aware rewrite inline
 - ✅ **Approve / Reject / Try Again** — review enhancements with buttons or purely by voice
-- ⚡ **Voice commands** — pause, resume, send, clear, enhance — all hands-free
-- 🔇 **FIFO mic muting** — when you say "send" or "pause", the mic cuts immediately so nothing bleeds in; already-spoken sentences drain first
+- ⚡ **Voice commands** — pause, resume, send, clear, enhance — all hands-free. Say "pause" mid-paragraph and everything you already said is still captured.
 - 📎 **Workspace context** — automatically reads your open files, active conversation, and workspace name for smarter prompts
 - 🔑 **Secure key storage** — Gemini API key stored in VS Code SecretStorage, never in code or config files
 
