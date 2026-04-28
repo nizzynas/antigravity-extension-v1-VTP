@@ -99,6 +99,27 @@ body {
   background: rgba(158, 206, 106, 0.1);
 }
 
+/* API Key status button */
+.btn-apikey-status {
+  border-color: rgba(247, 118, 142, 0.5);
+  color: var(--danger);
+}
+.btn-apikey-status:hover {
+  border-color: var(--danger);
+  background: rgba(247, 118, 142, 0.1);
+  color: var(--danger);
+}
+.btn-apikey-status.key-set {
+  border-color: rgba(158, 206, 106, 0.4);
+  color: var(--success);
+}
+.btn-apikey-status.key-set:hover {
+  border-color: var(--success);
+  background: rgba(158, 206, 106, 0.08);
+  color: var(--success);
+  cursor: default;
+}
+
 .vad-dot {
   width: 6px;
   height: 6px;

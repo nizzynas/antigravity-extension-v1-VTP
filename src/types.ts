@@ -43,12 +43,13 @@ export interface CustomCommand {
 
 /** Messages sent FROM the Webview TO the extension host */
 export type PanelMessage =
-  | { type: 'transcript'; segment: string; isFinal: boolean }
+  | { type: 'audioChunk'; base64: string; mimeType: string }  // recorded audio for Gemini transcription
   | { type: 'send'; prompt: string }
   | { type: 'cancel' }
   | { type: 'ready' }
   | { type: 'openSettings' }
-  | { type: 'showInfo' };
+  | { type: 'showInfo' }
+  | { type: 'log'; message: string };                          // webview diagnostics → output channel
 
 /** Messages sent FROM the extension host TO the Webview */
 export type ExtensionMessage =
@@ -59,4 +60,6 @@ export type ExtensionMessage =
   | { type: 'injected' }
   | { type: 'error'; message: string }
   | { type: 'contextUpdate'; workspaceName: string; conversationTitle: string }
-  | { type: 'settings'; vadMode: boolean; language: string };
+  | { type: 'settings'; vadMode: boolean; language: string }
+  | { type: 'transcriptResult'; text: string }                 // transcribed audio from Gemini
+  | { type: 'apiKeyStatus'; hasKey: boolean };                 // API key state for UI indicator
