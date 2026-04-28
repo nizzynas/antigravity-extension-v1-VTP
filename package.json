@@ -1,17 +1,39 @@
 {
   "name": "vtp-voice-prompt",
   "displayName": "VTP — Voice to Prompt",
-  "description": "Speak your ideas, enhance with Gemini, inject into Antigravity — a real-time voice-to-prompt coding assistant for VS Code.",
-  "version": "0.1.0",
+  "description": "Hands-free AI coding for VS Code. Dictate, enhance with Gemini, and send prompts into Antigravity — entirely by voice.",
+  "version": "0.1.2",
   "publisher": "nizzynas",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/nizzynas/antigravity-extension-v1-VTP" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nizzynas/antigravity-extension-v1-VTP"
+  },
   "homepage": "https://github.com/nizzynas/antigravity-extension-v1-VTP#readme",
-  "bugs": { "url": "https://github.com/nizzynas/antigravity-extension-v1-VTP/issues" },
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Other", "Machine Learning"],
-  "keywords": ["voice", "speech", "ai", "gemini", "prompt", "dictation", "voice-to-code", "antigravity", "vtp"],
-  "activationEvents": ["onStartupFinished"],
+  "bugs": {
+    "url": "https://github.com/nizzynas/antigravity-extension-v1-VTP/issues"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "voice",
+    "speech",
+    "ai",
+    "gemini",
+    "prompt",
+    "dictation",
+    "voice-to-code",
+    "antigravity",
+    "vtp"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {

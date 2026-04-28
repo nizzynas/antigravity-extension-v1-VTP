@@ -1,8 +1,8 @@
 # VTP — Voice to Prompt
 
-> **Speak your ideas. Enhance with Gemini. Inject into Antigravity.**
+> **Voice-driven AI coding. Dictate. Enhance. Send. Completely hands-free.**
 
-VTP is a real-time voice-to-prompt coding assistant for VS Code. Dictate your thoughts hands-free, let Gemini elaborate them into production-ready prompts, then send them directly into [Antigravity](https://antigravity.dev) — no copy-paste required.
+VTP turns your voice into a full AI coding workflow. Click once to start recording, then speak your idea — Gemini shapes it into a production-ready prompt and fires it straight into your prompts window in [Antigravity](https://antigravity.dev). Dictate, enhance, send: all by voice, no keyboard required once you're rolling.
 
 > **⚠️ Heads up:** This extension is pretty vibe-coded. After the voice pipeline was working, I started using VTP itself to build the rest of it — so there are rough edges but it works, it's useful, and it's being actively improved.
 
@@ -13,7 +13,8 @@ VTP is a real-time voice-to-prompt coding assistant for VS Code. Dictate your th
 - 🎙 **Live transcription** — FFmpeg-powered audio capture with real-time streaming to Gemini, no browser mic permission required
 - 🧠 **Gemini enhancement** — say *"enhance this prompt"* and get a polished, context-aware rewrite inline
 - ✅ **Approve / Reject / Try Again** — review enhancements with buttons or purely by voice
-- ⚡ **Voice commands** — pause, resume, send, clear, enhance — all hands-free. Say "pause" mid-paragraph and everything you already said is still captured.
+- 🚀 **Hands-free send** — say *"send it"* and your prompt is injected into Antigravity instantly. No clicking, no copy-paste, nothing.
+- ⚡ **Full voice control** — pause, resume, send, clear, enhance — all without touching the mouse
 - 📎 **Workspace context** — automatically reads your open files, active conversation, and workspace name for smarter prompts
 - 🔑 **Secure key storage** — Gemini API key stored in VS Code SecretStorage, never in code or config files
 
@@ -61,7 +62,7 @@ Click the microphone button (or enable VAD for always-on mode) and start dictati
 | Say | What happens |
 |---|---|
 | *(just talk)* | Appends to your prompt buffer |
-| `send it` / `send the prompt` | Injects directly into Antigravity — no paste needed |
+| `send it` / `send the prompt` | **Injects directly into Antigravity — hands-free, no click, no paste** |
 | `enhance this prompt` | Rewrites with Gemini. Approve / Reject / Try Again inline |
 | `approve` / `reject` / `try again` | Voice-control the enhancement review |
 | `pause` / `stop listening` | Mutes mic immediately; already-queued speech drains first |
@@ -88,6 +89,21 @@ Click the microphone button (or enable VAD for always-on mode) and start dictati
 - [Google Gemini API](https://ai.google.dev/) — transcription + enhancement
 - [FFmpeg](https://ffmpeg.org/) — low-latency audio capture
 - Vibe coded with [Antigravity](https://antigravity.dev) 🤙
+
+---
+
+## 🔒 Privacy
+
+VTP does not collect, store, or transmit any personal data.
+
+| What | Where it goes |
+|---|---|
+| 🎙 Audio | Captured in-memory, sent to Gemini for transcription, then discarded. Never written to disk. |
+| 📝 Transcripts | Held in the panel session only. Gone when you close VTP. |
+| 💬 Prompts | Sent to Antigravity on your local machine. Not stored by VTP. |
+| 🔑 API key | Stored in VS Code SecretStorage (your OS keychain). Never in a file, never leaves your machine. |
+
+No telemetry. No analytics. No backend.
 
 ---
 
