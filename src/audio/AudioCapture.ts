@@ -107,7 +107,7 @@ export class AudioCapture {
 
   // ─── Chunked mode (live transcript) ─────────────────────────────────────────
 
-  async startChunked(chunkSeconds = 1, maxSeconds = 300): Promise<void> {
+  async startChunked(chunkSeconds = 3, maxSeconds = 300): Promise<void> {
     // ── Serialize: wait for any in-progress stop or kill before spawning ────────
     // Without this, fire-and-forget callers race with startRecording(), creating
     // multiple FFmpeg processes holding the same DirectShow mic device.
@@ -140,7 +140,7 @@ export class AudioCapture {
     const audioFilter = [
       'highpass=f=80',
       'afftdn=nf=-25:nt=w',
-      'silencedetect=noise=-40dB:d=2.5',
+      'silencedetect=noise=-40dB:d=10',
     ].join(',');
 
     let inputArgs: string[];
@@ -332,7 +332,16 @@ export class AudioCapture {
   }
 
   private async _buildArgs(outFile: string, maxSeconds: number): Promise<string[]> {
-    const silenceFilter = 'silencedetect=noise=-40dB:d=3.0';
+    // ── Wake monitor audio filter ────────────────────────────────────────────
+    // Same highpass + afftdn chain as chunked mode for consistency.
+    // d=0.5: only 0.5s of quiet needed before speech is detected as silence_end.
+    // d=3.0 was the bug — it required a 3-second silent pause before ANY speech
+    // could trigger silence_end, so spamming "resume" continuously never worked.
+    const silenceFilter = [
+      'highpass=f=80',
+      'afftdn=nf=-25:nt=w',
+      'silencedetect=noise=-40dB:d=0.5',
+    ].join(',');
     const common = ['-ar', '16000', '-ac', '1', '-af', silenceFilter, '-y'];
     if (process.platform === 'win32') {
       const device = await AudioCapture.getWindowsAudioDevice();

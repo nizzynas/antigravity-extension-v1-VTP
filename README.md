@@ -10,39 +10,15 @@ VTP turns your voice into a full AI coding workflow. Click once to start recordi
 
 ## ✨ Features
 
-- 🌐 **Dual transcription engines** — choose between Web Speech API (Google STT, low-latency) or FFmpeg + Gemini. Toggle with a single click in the panel header.
+- 🎙 **FFmpeg + Gemini pipeline** — audio is captured locally by FFmpeg, denoised, and transcribed by Gemini. No browser dependency, no cloud STT lock-in.
+- 🔇 **Built-in noise suppression** — a 3-stage FFmpeg filter chain (`highpass → afftdn → silencedetect`) strips low-frequency rumble and PC background noise before audio ever reaches Gemini.
 - 🧠 **Gemini enhancement** — say *"enhance this prompt"* and get a polished, context-aware rewrite inline
 - ✅ **Approve / Reject / Try Again** — review enhancements with buttons or purely by voice
-- 🚀 **Hands-free send** — say *"send it"* and your prompt is injected into Antigravity instantly. No clicking, no copy-paste, nothing.
-- ⏸ **Smart auto-pause** — silence detection in both modes. SR mode uses a JS timer; FFmpeg mode uses FFmpeg VAD. Either way, goes quiet → auto-pauses.
+- 🚀 **Hands-free send** — say *"send it"* or *"send the prompt"* and your prompt is injected into Antigravity instantly. No clicking, no copy-paste, nothing.
+- ⏸ **Smart auto-pause** — silence detection auto-pauses after you stop talking, then restarts automatically for continuous listening
 - ⚡ **Full voice control** — pause, resume, send, clear, enhance — all without touching the mouse
 - 📎 **Workspace context** — automatically reads your open files, active conversation, and workspace name for smarter prompts
 - 🔑 **Secure key storage** — Gemini API key stored in VS Code SecretStorage, never in code or config files
-
----
-
-## 🎙 Transcription Engines
-
-VTP now supports two transcription engines. You can switch between them at any time using the **`🌐 SR` / `🔧 FFM`** toggle button in the panel header.
-
-| Engine | Button | How it works | Best for |
-|---|---|---|---|
-| **Web Speech API** *(default)* | `🌐 SR` | Browser's built-in Google STT. Near-instant, high accuracy. Requires internet. | Most users |
-| **FFmpeg + Gemini** | `🔧 FFM` | FFmpeg captures audio chunks, Gemini transcribes. Requires FFmpeg on PATH. | Offline / headless |
-
-> **On Windows**, DirectShow is exclusive — only one engine can hold the mic at a time. FFmpeg is still used for **wake-phrase detection during pause**, regardless of which transcription engine is active.
-
----
-
-## 🖥 Platform Support
-
-| Platform | Status |
-|---|---|
-| **Windows** | ✅ Fully supported |
-| macOS | 🔜 Planned |
-| Linux | 🔜 Planned |
-
-> FFmpeg is required for pause/wake monitoring in both modes. It does not need to be installed if you never use the pause feature, but it's strongly recommended.
 
 ---
 
@@ -55,11 +31,11 @@ VTP now supports two transcription engines. You can switch between them at any t
 winget install ffmpeg
 ```
 
-Or download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH.
+Or download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to your system PATH. Restart VS Code after installing.
 
 ### 2. Get a Gemini API Key
 
-Get a key at [aistudio.google.com](https://aistudio.google.com/apikey) — **no credit card required**. Use the free tier (~15 req/min) or a pay-as-you-go plan for higher limits.
+Get a key at [aistudio.google.com](https://aistudio.google.com/apikey) — **no credit card required**. The free tier (~15 req/min) is enough for normal use.
 
 ### 3. Add your key to VTP
 
@@ -67,7 +43,7 @@ Open the VTP panel from the Activity Bar, click **KEY**, and paste your Gemini A
 
 ### 4. Start talking
 
-Click the microphone button and start dictating. The default engine is **Web Speech API** (`🌐 SR`) — no FFmpeg needed for transcription in this mode.
+Click the microphone button and start dictating. Audio processes in 3-second chunks — so you'll see the transcript update every few seconds as you speak.
 
 ---
 
@@ -81,8 +57,18 @@ Click the microphone button and start dictating. The default engine is **Web Spe
 | `approve` / `reject` / `try again` | Voice-control the enhancement review |
 | `pause` / `stop listening` | Mutes mic; already-spoken speech finishes processing first |
 | `resume` / `continue` / `I'm back` | Wakes from pause |
-| `cancel` / `clear that` | Discards the current transcript buffer |
+| `clear transcript` / `clear that` | Discards the current transcript buffer |
 | `open the terminal` / `run tests` | IDE commands — runs without touching the prompt |
+
+---
+
+## 🖥 Platform Support
+
+| Platform | Status |
+|---|---|
+| **Windows** | ✅ Fully supported (DirectShow via FFmpeg) |
+| macOS | 🔜 Planned (AVFoundation) |
+| Linux | 🔜 Planned (ALSA) |
 
 ---
 
@@ -90,20 +76,37 @@ Click the microphone button and start dictating. The default engine is **Web Spe
 
 | Setting | Default | Description |
 |---|---|---|
-| `vtp.transcriptionMode` | `speechRecognition` | Transcription engine: `speechRecognition` (Web Speech API) or `ffmpeg` (FFmpeg + Gemini) |
-| `vtp.vadMode` | `false` | Always-on voice activity detection — auto-pauses after silence |
-| `vtp.language` | `en-US` | Speech recognition language (BCP-47) |
-| `vtp.contextDepth` | `20` | Recent conversation messages passed as context |
+| `vtp.vadMode` | `false` | Always-on VAD — auto-pauses after silence, restarts automatically |
+| `vtp.contextDepth` | `20` | Recent conversation messages passed as context to Gemini |
 | `vtp.elaborationModel` | `gemini-2.5-flash` | Gemini model used for prompt enhancement |
+
+---
+
+## 🔧 How the Audio Pipeline Works
+
+```
+Mic → FFmpeg → [highpass=f=80] → [afftdn=nf=-25] → [silencedetect] → WAV chunks
+                  Remove rumble      FFT denoiser       VAD trigger
+                                                              ↓
+                                                       Gemini 2.5 Flash
+                                                         (transcribe)
+                                                              ↓
+                                                      Live transcript UI
+```
+
+1. **`highpass=f=80`** — strips sub-80Hz rumble (HVAC, desk vibration, USB hiss)
+2. **`afftdn=nf=-25`** — FFmpeg's FFT denoiser; estimates noise floor in first ~0.4s and subtracts it every frame
+3. **`silencedetect=noise=-40dB:d=2.5`** — triggers VAD after 2.5s of true silence (on the *cleaned* signal)
+4. Audio is segmented into **3-second WAV chunks** and sent to Gemini for verbatim transcription
+5. Each chunk's transcript is appended live to the panel as it comes back
 
 ---
 
 ## 🛠 Built With
 
 - [VS Code Extension API](https://code.visualstudio.com/api)
-- [Google Gemini API](https://ai.google.dev/) — intent classification + prompt enhancement
-- [Web Speech API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Speech_API) — real-time transcription (SR mode)
-- [FFmpeg](https://ffmpeg.org/) — audio capture + wake monitoring (FFmpeg mode)
+- [Google Gemini API](https://ai.google.dev/) — transcription, intent classification + prompt enhancement
+- [FFmpeg](https://ffmpeg.org/) — audio capture, noise suppression, VAD
 - Vibe coded with [Antigravity](https://antigravity.dev) 🤙
 
 ---
@@ -114,8 +117,7 @@ VTP does not collect, store, or transmit any personal data.
 
 | What | Where it goes |
 |---|---|
-| 🎙 Audio (SR mode) | Processed entirely by your browser's built-in speech engine. Never sent to VTP servers. |
-| 🎙 Audio (FFmpeg mode) | Captured in-memory, sent to Gemini for transcription, then discarded. Never written to disk. |
+| 🎙 Audio | Captured locally by FFmpeg, sent to Gemini for transcription, then discarded. Never written to disk permanently. |
 | 📝 Transcripts | Held in the panel session only. Gone when you close VTP. |
 | 💬 Prompts | Sent to Antigravity on your local machine. Not stored by VTP. |
 | 🔑 API key | Stored in VS Code SecretStorage (your OS keychain). Never in a file, never leaves your machine. |

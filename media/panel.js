@@ -279,12 +279,19 @@
         setStatus('idle', '✨ Enhancement approved');
         break;
 
+
       case 'enhancedRejected':
         hideEnhanceReview();
         committedText = msg.original;
         interimText   = '';
         renderLiveTranscript();
         setStatus('idle', '↩ Original restored');
+        break;
+
+      case 'awaitingDecision':
+        // Non-decision speech was discarded — pulse the status bar as a reminder
+        setStatus('processing', '🎙 Say: approve, reject, or try again');
+        setTimeout(() => setStatus('processing', '✨ Approve, Reject, or Try Again'), 1800);
         break;
 
       case 'injected':

@@ -55,6 +55,8 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private _awaitingEnhancementDecision = false;
   /** The original promptBuffer content saved before elaboration runs. */
   private _originalBufferBeforeEnhance = '';
+  /** Set when 'enhance this prompt' is detected mid-stream — mirrors _sendTriggerFired pattern. */
+  private _enhanceTriggerFired = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -180,6 +182,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this._chunkQueue        = Promise.resolve();
       this._sendTriggerFired  = false;
       this._restartAfterSend  = false;
+      this._enhanceTriggerFired = false;
       this._vadStop           = false;
       this._cancelChunks      = false;
       const sessionGen        = ++this._sessionGen; // invalidates all in-flight chunks from old sessions
@@ -353,7 +356,13 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         await new Promise<void>((r) => setTimeout(r, 300)); // DirectShow init
         if (!this.isPaused) { await this.capture.stop(); break; }
 
+        // onSilenceDetected = silence_END (speech starts after quiet).
+        // onSilenceStart    = silence_START (speech just ended / user paused).
+        // Both can signal "user spoke" — wire them both so we don't miss speech
+        // that was already in-progress when FFmpeg started (d=0.5 means any
+        // 0.5s pause fires silence_start, which is enough to confirm speech).
         this.capture.onSilenceDetected = () => speechDetectedResolve();
+        this.capture.onSilenceStart    = () => speechDetectedResolve();
         this.log.appendLine('[VTP] Wake monitor: waiting for speech...');
         this.send({ type: 'wakeReady' });
 
@@ -369,6 +378,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         await new Promise<void>((r) => setTimeout(r, 1500));
         const result = await this.capture.stop();
         this.capture.onSilenceDetected = null;
+        this.capture.onSilenceStart    = null;
 
         if (!result) continue;
 
@@ -493,11 +503,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       const base64 = buffer.toString('base64');
       const genai  = new GoogleGenerativeAI(apiKey);
       const sysInstruction =
-        'You are transcribing audio from a software developer dictating code requirements. ' +
-        'Transcribe ONLY clearly audible spoken words exactly as heard. ' +
-        'Preserve technical terms, framework names, and developer jargon verbatim. ' +
-        'IMPORTANT: If the audio is quiet, noisy, unclear, or you cannot make out distinct words, ' +
-        'you MUST output exactly: [SILENCE] — never guess or generate plausible content.';
+        'You are a verbatim speech-to-text transcriber. ' +
+        'Your ONLY job is to write down the exact words spoken in the audio, nothing more. ' +
+        'Output plain text only — no timestamps, no VTT format, no SRT format, no speaker labels. ' +
+        'Do NOT infer, complete, or expand on what was said. ' +
+        'Do NOT generate content that was not clearly spoken in the audio. ' +
+        'If the audio contains silence, background noise, or no intelligible speech, output exactly: [SILENCE]';
 
       // Cascade: 2 active stable models as of April 2026.
       // 2.0-flash + 1.5-flash are deprecated/removed. 2.5-flash → 2.5-flash-lite.
@@ -572,15 +583,24 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.send({ type: 'transcriptResult', text: displayText });
       this.log.appendLine(`[VTP] Live chunk: "${text}"`);
 
-      // Detect send trigger in accumulated text — auto-stop without user clicking
+      // ── Send trigger: immediately mute mic, drain queue, inject ────────────
       if (!this._sendTriggerFired && this._hasSendTrigger(this.interimTranscript)) {
         this._sendTriggerFired = true;
         this._restartAfterSend = true;
-        // kill() immediately mutes the mic (stops FFmpeg + poller) so no new audio
-        // comes in. Already-queued chunks drain naturally via _chunkQueue.
-        // stopRecording() awaits _chunkQueue, so inject happens after full drain.
         this.capture.kill();
         this.log.appendLine('[VTP] Send trigger — mic muted, draining queue then injecting.');
+        this.send({ type: 'vadAutoStop' });
+        void this.stopRecording();
+      }
+
+      // ── Enhance trigger: same immediate-mute pattern as send trigger ─────────
+      // Detects "enhance this prompt" in the accumulated live text and kills the
+      // mic instantly — no waiting for 1.5s VAD silence + Gemini classification.
+      const ENHANCE_LIVE = /\b(enhance\s+(this|my|the)\s+prompt|enhance\s+prompt|improve\s+(this|my|the)\s+prompt|rewrite\s+(this|my|the)\s+prompt)\b/i;
+      if (!this._enhanceTriggerFired && !this._sendTriggerFired && ENHANCE_LIVE.test(this.interimTranscript)) {
+        this._enhanceTriggerFired = true;
+        this.capture.kill();
+        this.log.appendLine('[VTP] Enhance trigger — mic muted, draining queue then enhancing.');
         this.send({ type: 'vadAutoStop' });
         void this.stopRecording();
       }
@@ -665,25 +685,39 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     return match ? match[1].trim() : `Conversation ${id.slice(0, 8)}`;
   }
   private sanitizeTranscription(raw: string): string {
+    let text = raw.trim();
+
+    // ── Strip VTT / SRT subtitle format ────────────────────────────────────
+    // Gemini sometimes returns its audio response in WebVTT or SRT format.
+    // Rows like "00:00:00.000 --> 00:00:02.500" must be removed.
+    // Also remove the "WEBVTT" header line if present.
+    text = text.replace(/^WEBVTT[\s\S]*?\n\n/m, '');       // WEBVTT header block
+    text = text.replace(/\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}/g, ''); // full timestamps
+    text = text.replace(/^\d{2}:\d{2}(:\d{2})?$/gm, '');   // short time tokens like "00:00" or "01:23:45"
+    text = text.replace(/^\d+$/gm, '');                    // SRT sequence numbers
+
+    // ── Strip ALL [bracketed] non-speech annotations ────────────────────────
+    text = text.replace(/\[[^\]]*\]/g, '');
+
+    // ── Strip leaked system-prompt text ─────────────────────────────────────
     const LEAK_MARKERS = [
       'Transcribe this audio exactly as spoken',
       'Output only the transcription',
       'If no speech, output an empty string',
       'You are a transcription service',
       'Transcribe the audio.',
-      'transcribe the audio',  // lowercase variant Gemini sometimes returns
+      'transcribe the audio',
+      'You are a verbatim',
     ];
-    let text = raw.trim();
-    // Strip ALL [bracketed] non-speech annotations in one pass
-    text = text.replace(/\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
-    // Strip leaked system-prompt text (case-insensitive search)
     for (const marker of LEAK_MARKERS) {
-      const lower = text.toLowerCase();
-      const idx = lower.indexOf(marker.toLowerCase());
+      const idx = text.toLowerCase().indexOf(marker.toLowerCase());
       if (idx > -1) {
         text = text.substring(0, idx).trim().replace(/[.,!?]+$/, '').trim();
       }
     }
+
+    // ── Collapse whitespace ─────────────────────────────────────────────────
+    text = text.replace(/\s{2,}/g, ' ').trim();
     return text;
   }
 
@@ -693,22 +727,27 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     // ── Enhancement review intercept — voice approve / reject / regenerate ──
     if (this._awaitingEnhancementDecision) {
       const lc = segment.toLowerCase();
-      if (/\b(approve|accept|looks? good|yes|use it|perfect|great|send it|keep it|apply)\b/.test(lc)) {
+      // Fuzzy approve: also catch "prove" (chunk-boundary fragment of "approve")
+      if (/\b(approve|accept|looks?\s+good|yes|use\s+it|perfect|great|keep\s+it|apply)\b|prove\s*$/i.test(lc)) {
         this.log.appendLine('[VTP] Voice command: approve enhancement.');
         await this.handleEnhancementDecision('approve');
         return;
       }
-      if (/\b(reject|revert|no|go back|undo|restore|cancel|discard|original)\b/.test(lc)) {
+      if (/\b(reject|revert|no|go\s+back|undo|restore|cancel|discard|original)\b/i.test(lc)) {
         this.log.appendLine('[VTP] Voice command: reject enhancement.');
         await this.handleEnhancementDecision('reject');
         return;
       }
-      if (/\b(regenerate|try again|redo|new version|another|different|again)\b/.test(lc)) {
+      if (/\b(regenerate|try\s+again|redo|new\s+version|another|different|again)\b/i.test(lc)) {
         this.log.appendLine('[VTP] Voice command: regenerate enhancement.');
         await this.handleEnhancementDecision('regenerate');
         return;
       }
-      // Fall through — user said something unrelated, append to buffer
+      // Discard non-decision speech entirely — don't pollute the prompt buffer
+      // while the user is in the approve/reject review flow.
+      this.log.appendLine('[VTP] Enhancement pending — discarding non-decision speech.');
+      this.send({ type: 'awaitingDecision' });
+      return;
     }
 
     // ── Local voice commands (no Gemini needed) ────────────────────────────
@@ -733,8 +772,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
 
     // ── Fast-path: send trigger already confirmed by local regex ─────────────
-    // _sendTriggerFired was set during live-chunk processing.  We already know
-    // the intent — no need to ask Gemini (avoids 30s of 503 retries).
     if (this._sendTriggerFired) {
       const content = this.stripSendTrigger(segment);
       if (content) {
@@ -746,17 +783,51 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       } else {
         await this.injectRaw();
       }
-      // Always restart for continuous listening after a triggered send.
       this.log.appendLine('[VTP] Restarting mic after send.');
       void this.startRecording();
       return;
     }
 
+    // ── Fast-path: enhance trigger already confirmed by local regex ────────────
+    // _enhanceTriggerFired was set during live-chunk processing — skip Gemini
+    // intent classification entirely, go straight to elaboration.
+    if (this._enhanceTriggerFired) {
+      this._enhanceTriggerFired = false;
+      const content = this.stripEnhanceTrigger(segment);
+      if (content) {
+        this.promptBuffer += (this.promptBuffer ? ' ' : '') + content;
+      }
+      this.log.appendLine('[VTP] ENHANCE (local trigger — Gemini classification bypassed).');
+      await this.elaborateAndShow();
+      return;
+    }
+
     // ── Fast path: plain dictation (no action keywords) ─────────────────────
     // Only call Gemini when text contains an explicit VTP action trigger.
-    const SEND_TRIGGER   = /\b(send it|send this|send the prompt|send this prompt|send my prompt|send now|submit this|submit the prompt)\b[.,!?\s]*$/i;
+    const SEND_TRIGGER   = /\b(send it|send this|send the prompt|send this prompt|send my prompt|send now|submit this|submit the prompt)\b[.,!?\\s]*$/i;
     const ACTION_TRIGGER = /\b(enhance (this|my|the) prompt|rewrite (this|my|the) prompt|improve (this|my|the) prompt|cancel( that)?|clear( that)?|open the terminal|run (the )?tests|hey vtp)\b/i;
     const segmentCleaned = this._stripFiller(segment);
+
+    // ── Tail-scan fallback: send trigger in last ~120 chars ──────────────────
+    // If VAD fired after "send the prompt" and subsequent chunks appended more
+    // words, the $-anchored live-chunk regex will have missed it.  Scan the
+    // tail of the final assembled text as a recovery path.
+    if (!this._sendTriggerFired && this._hasSendTrigger(segment.slice(-120))) {
+      this._sendTriggerFired = true;
+      // Strip the trigger phrase from the end of the content
+      const tailCleaned = this.stripSendTrigger(segment);
+      if (tailCleaned) {
+        this.promptBuffer += (this.promptBuffer ? ' ' : '') + tailCleaned;
+      }
+      this.log.appendLine('[VTP] SEND (tail-scan trigger — chunk boundary recovery).');
+      if (!this.promptBuffer.trim()) {
+        this.send({ type: 'error', message: 'Nothing to send — say something first.' });
+      } else {
+        await this.injectRaw();
+      }
+      void this.startRecording();
+      return;
+    }
 
     if (!SEND_TRIGGER.test(segment) && !SEND_TRIGGER.test(segmentCleaned) && !ACTION_TRIGGER.test(segment)) {
       this.promptBuffer += (this.promptBuffer ? ' ' : '') + segment;
@@ -908,6 +979,19 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     return text;
   }
 
+  private stripEnhanceTrigger(segment: string): string {
+    const triggers = [
+      'enhance this prompt', 'enhance my prompt', 'enhance the prompt', 'enhance prompt',
+      'improve this prompt', 'improve my prompt', 'improve the prompt',
+      'rewrite this prompt', 'rewrite my prompt', 'rewrite the prompt',
+    ];
+    let text = segment.trim();
+    for (const trigger of triggers) {
+      text = text.replace(new RegExp(`[.,!?]?\\s*${trigger}[.,!?]?$`, 'gi'), '').trim();
+    }
+    return text;
+  }
+
 
   /** Voice said 'enhance prompt' — elaborate then surface in panel for review */
   private async elaborateAndShow(): Promise<void> {
@@ -948,6 +1032,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   /** Handle approve / reject / regenerate from panel buttons or voice */
   private async handleEnhancementDecision(action: 'approve' | 'reject' | 'regenerate'): Promise<void> {
     this._awaitingEnhancementDecision = false;
+    // Discard any speech that arrived during the decision window so it doesn't
+    // bleed into the prompt buffer (e.g. the user saying "I approve" post-decision).
+    this.interimTranscript = '';
 
     if (action === 'approve') {
       // promptBuffer already has enhanced text — nothing to do on host side.
