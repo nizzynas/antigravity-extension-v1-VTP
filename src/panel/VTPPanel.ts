@@ -91,22 +91,20 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       case 'resumeRecording': await this.resumeRecording(); break;
       case 'send':           await this.onSend(msg.prompt); break;
       case 'speechInterim':
-        // Live text from Web Speech API — update transcript display immediately.
-        // No API call needed; this fires word-by-word as the user speaks.
-        if (msg.text !== undefined) {
-          this.promptBuffer = msg.text;
-          this.send({ type: 'transcriptResult', text: msg.text });
+        // Webview renders its own interim display in real-time.
+        // Extension host does not need to act — ignore to avoid promptBuffer interference.
+        break;
+      case 'speechFinal': {
+        // One completed utterance from Web Speech API.
+        // Pass the segment to onFinalTranscript which will append it to promptBuffer
+        // and handle commands (pause, send, cancel, etc.).
+        const seg = msg.segment?.trim();
+        if (seg) {
+          this.log.appendLine(`[VTP] WSA final: "${seg}"`);
+          await this.onFinalTranscript(seg);
         }
         break;
-      case 'speechFinal':
-        // A completed utterance from Web Speech API — run intent classification.
-        // This replaces the old Gemini-transcription → onFinalTranscript path.
-        if (msg.segment && msg.segment.trim()) {
-          this.promptBuffer = msg.committed || msg.segment;
-          this.log.appendLine(`[VTP] WSA final: "${msg.segment}"`);
-          await this.onFinalTranscript(msg.segment);
-        }
-        break;
+      }
       case 'cancel':
         this.promptBuffer      = '';
         this.interimTranscript = '';
@@ -179,27 +177,19 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     try {
       this.log.appendLine('[VTP] Starting FFmpeg audio capture...');
 
-      // ── Wire VAD callbacks (FFmpeg used for VAD + wake monitor, not transcription) ─
+      // ── VAD callbacks (WSA mode) ──────────────────────────────────────────────
+      // onSilenceDetected fires on silence_END (= user STARTS talking). In WSA
+      // mode this is not useful — Web Speech API handles transcription. Null it
+      // out so starting to talk never accidentally triggers an auto-pause.
+      this.capture.onSilenceDetected = null;
 
-      this.capture.onSilenceDetected = () => {
-        if (!this.capture.isRecording()) return;
-        if (this.isPaused && !this._restartAfterSend) {
-          this.log.appendLine('[VTP] Pause monitor: checking for wake phrase...');
-          this.checkForWakePhrase();
-        } else if (!this.isPaused) {
-          this.log.appendLine('[VTP] VAD: extended silence — auto-pausing.');
-          this.isPaused = true;
-          this.send({ type: 'autoPaused' });
-        }
-      };
-
+      // onExtendedSilence fires 15s after silence_START (user has been quiet).
+      // Still useful in WSA mode: auto-pause after a long idle period.
       this.capture.onExtendedSilence = () => {
         if (this.isPaused) return;
-        if (this.capture.isRecording()) {
-          this.log.appendLine('[VTP] VAD: extended silence — auto-pausing (mic stays on).');
-          this.isPaused = true;
-          this.send({ type: 'autoPaused' });
-        }
+        this.log.appendLine('[VTP] WSA: 15s idle — auto-pausing.');
+        this.isPaused = true;
+        this.send({ type: 'autoPaused' });
       };
 
       // ── Reset state for new session ─────────────────────────────────────────

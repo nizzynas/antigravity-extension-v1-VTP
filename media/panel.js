@@ -329,6 +329,12 @@
         break;
 
       case 'paused':
+        // Stop recognition so WSA doesn't send speechFinal during the wake monitor loop.
+        if (recognition) {
+          intentionalStop = true;
+          try { recognition.stop(); } catch (_) {}
+          recognition = null;
+        }
         setPaused(true);
         break;
 
@@ -348,8 +354,10 @@
         break;
 
       case 'transcriptResult':
-        // Extension host sends the committed prompt buffer (after cancel/send/etc.)
-        renderTranscript(msg.text);
+        // Host sends this to sync the display after cancel / send / clear commands.
+        committedText = msg.text || '';
+        interimText   = '';
+        renderLiveTranscript();
         if (!isPaused) setStatus('idle', 'Ready — press Record');
         break;
 
