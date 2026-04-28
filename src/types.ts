@@ -43,13 +43,15 @@ export interface CustomCommand {
 
 /** Messages sent FROM the Webview TO the extension host */
 export type PanelMessage =
-  | { type: 'audioChunk'; base64: string; mimeType: string }  // recorded audio for Gemini transcription
+  | { type: 'startRecording' }                                 // open system browser capture page
+  | { type: 'stopRecording' }                                  // user manually stopped
   | { type: 'send'; prompt: string }
   | { type: 'cancel' }
   | { type: 'ready' }
   | { type: 'openSettings' }
   | { type: 'showInfo' }
-  | { type: 'log'; message: string };                          // webview diagnostics → output channel
+  | { type: 'micPermissionDenied' }                            // legacy — keep for safety
+  | { type: 'log'; message: string };
 
 /** Messages sent FROM the extension host TO the Webview */
 export type ExtensionMessage =
@@ -62,4 +64,6 @@ export type ExtensionMessage =
   | { type: 'contextUpdate'; workspaceName: string; conversationTitle: string }
   | { type: 'settings'; vadMode: boolean; language: string }
   | { type: 'transcriptResult'; text: string }                 // transcribed audio from Gemini
-  | { type: 'apiKeyStatus'; hasKey: boolean };                 // API key state for UI indicator
+  | { type: 'apiKeyStatus'; hasKey: boolean }                  // API key state for UI indicator
+  | { type: 'recordingStarted' }                               // browser capture page opened
+  | { type: 'recordingStopped' };                              // audio received, processing
