@@ -240,7 +240,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private async stopRecording(): Promise<void> {
-    if (this._stopping || !this.capture.isRecording()) {
+    // Only guard against concurrent calls — NOT against isRecording(), because
+    // kill() may have already muted the mic before stopRecording() is called.
+    if (this._stopping) {
       this.send({ type: 'recordingStopped' });
       return;
     }
@@ -474,9 +476,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
    */
   private async processLiveChunk(buffer: Buffer, mimeType: string): Promise<void> {
     // ── Early-exit guards ────────────────────────────────────────────────────
-    // _cancelChunks is set when a send/pause command fires mid-stream so that
-    // already-queued Gemini calls return immediately without touching state.
-    if (this._cancelChunks) return;
+    // capture.kill() is the mic-mute mechanism — it stops FFmpeg + the chunk
+    // poller so no new onChunkReady events fire after send/pause is detected.
+    // Already-queued chunks are intentionally allowed to drain so no dictation is lost.
     if (buffer.length < 4096) return; // too small — partial/empty segment
 
     // ── Local energy gate ─────────────────────────────────────────────────────
@@ -530,8 +532,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         }
       }
 
-      // Re-check after async Gemini call — a send/pause may have fired while we waited.
-      if (this._cancelChunks) return;
+      // Re-check after async Gemini call — only bail if isPaused has been set
+      // (meaning the pause action already ran from a prior chunk's queue slot).
+      // We do NOT check _cancelChunks because kill() handles muting instead.
+      if (this.isPaused) return;
 
       if (raw === null) {
         this.log.appendLine('[VTP] All models busy — chunk skipped.');
@@ -543,16 +547,14 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
       // ── Real-time pause detection ────────────────────────────────────────────
       // Only fire if the entire chunk IS a pause command.
-      // IMPORTANT: do NOT set _cancelChunks on pause — let all already-queued
-      // chunks finish transcribing so the user's full 5 sentences are captured
-      // before the pause takes effect.
+      // Kill the mic immediately so no new audio comes in, then drain the queue
+      // so all already-spoken sentences are transcribed before pausing.
       const PAUSE_CMD = /^[\s.,!?]*(pause(\s+(vtp|recording|listening))?|stop\s+listening)[\s.,!?]*$/i;
       if (PAUSE_CMD.test(text)) {
-        this.log.appendLine('[VTP] Live chunk: "pause" detected — pausing after queue drains.');
-        // Do NOT set _cancelChunks. Let all previously-queued chunks finish.
-        // Queue the pause itself at the END so it runs after every earlier chunk.
+        this.log.appendLine('[VTP] Live chunk: "pause" detected — mic muted, draining queue then pausing.');
+        this.capture.kill(); // ← immediate mic mute: stops FFmpeg + chunk poller
         this._chunkQueue = this._chunkQueue.then(() => {
-          this.interimTranscript = ''; // discard only the "pause" word
+          this.interimTranscript = ''; // discard the word "pause"
           this.send({ type: 'transcriptResult', text: this.promptBuffer });
           this.isPaused = true;
           this.send({ type: 'paused' });
@@ -578,10 +580,11 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       if (!this._sendTriggerFired && this._hasSendTrigger(this.interimTranscript)) {
         this._sendTriggerFired = true;
         this._restartAfterSend = true;
-        // Cancel remaining queued chunks immediately — stopRecording's await
-        // _chunkQueue will resolve instantly instead of waiting for stale API calls.
-        this._cancelChunks = true;
-        this.log.appendLine('[VTP] Send trigger detected — auto-stopping for send.');
+        // kill() immediately mutes the mic (stops FFmpeg + poller) so no new audio
+        // comes in. Already-queued chunks drain naturally via _chunkQueue.
+        // stopRecording() awaits _chunkQueue, so inject happens after full drain.
+        this.capture.kill();
+        this.log.appendLine('[VTP] Send trigger — mic muted, draining queue then injecting.');
         this.send({ type: 'vadAutoStop' });
         void this.stopRecording();
       }
