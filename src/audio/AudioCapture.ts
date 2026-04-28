@@ -107,7 +107,7 @@ export class AudioCapture {
 
   // ─── Chunked mode (live transcript) ─────────────────────────────────────────
 
-  async startChunked(chunkSeconds = 2, maxSeconds = 300): Promise<void> {
+  async startChunked(chunkSeconds = 1, maxSeconds = 300): Promise<void> {
     // ── Serialize: wait for any in-progress stop or kill before spawning ────────
     // Without this, fire-and-forget callers race with startRecording(), creating
     // multiple FFmpeg processes holding the same DirectShow mic device.
@@ -127,7 +127,21 @@ export class AudioCapture {
     fs.mkdirSync(this._chunkDir, { recursive: true });
 
     const chunkPattern = path.join(this._chunkDir, 'chunk%03d.wav');
-    const silenceFilter = 'silencedetect=noise=-40dB:d=5.0';
+
+    // ── Audio filter chain ───────────────────────────────────────────────────
+    // 1. highpass=f=80  — strip sub-80 Hz rumble (HVAC, desk vibration, USB noise).
+    //    Human voice is 80 Hz–8 kHz; anything below is pure noise.
+    // 2. afftdn=nf=-25  — FFmpeg's built-in FFT DeNoiser.
+    //    Estimates the noise floor during the first ~0.4 s of audio and subtracts it.
+    //    nf=-25: assume noise floor is at most -25 dBFS (fan, keyboard, AC hum).
+    //    nt=w   : white-noise type — best for broadband PC background noise.
+    // 3. silencedetect   — runs AFTER denoising, so quiet speech passes and only
+    //    true silence triggers VAD. Back to -40 dB because the signal is clean.
+    const audioFilter = [
+      'highpass=f=80',
+      'afftdn=nf=-25:nt=w',
+      'silencedetect=noise=-40dB:d=2.5',
+    ].join(',');
 
     let inputArgs: string[];
     if (process.platform === 'win32') {
@@ -144,7 +158,7 @@ export class AudioCapture {
     const args = [
       ...inputArgs,
       '-ar', '16000', '-ac', '1',
-      '-af', silenceFilter,
+      '-af', audioFilter,
       '-f', 'segment',
       '-segment_time', String(chunkSeconds),
       '-segment_format', 'wav',

@@ -2,7 +2,7 @@
   "name": "vtp-voice-prompt",
   "displayName": "VTP — Voice to Prompt",
   "description": "Hands-free AI coding for VS Code. Dictate, enhance with Gemini, and send prompts into Antigravity — entirely by voice.",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "publisher": "nizzynas",
   "license": "MIT",
   "repository": {
@@ -77,28 +77,10 @@
           "default": 20,
           "description": "Number of recent conversation messages to pass as context"
         },
-        "vtp.language": {
-          "type": "string",
-          "default": "en-US",
-          "description": "Speech recognition language (BCP-47 tag)"
-        },
         "vtp.elaborationModel": {
           "type": "string",
           "default": "gemini-2.5-flash",
           "description": "Gemini model used for prompt elaboration"
-        },
-        "vtp.transcriptionMode": {
-          "type": "string",
-          "enum": [
-            "speechRecognition",
-            "ffmpeg"
-          ],
-          "enumDescriptions": [
-            "Browser Web Speech API (Google STT) — lower latency, higher accuracy. Requires internet.",
-            "FFmpeg + Gemini — works offline, requires FFmpeg on PATH."
-          ],
-          "default": "speechRecognition",
-          "description": "Transcription engine. Switch to 'ffmpeg' if you don't have a browser mic or want offline transcription."
         }
       }
     }
