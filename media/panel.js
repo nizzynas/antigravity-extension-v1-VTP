@@ -183,9 +183,16 @@
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         stream.getTracks().forEach(t => t.stop());
-      } catch (_err) {
-        post({ type: 'micPermissionDenied' });
-        setStatus('idle', '⚠ Mic permission denied — check OS settings');
+      } catch (err) {
+        const errName = (err && err.name) ? err.name : String(err);
+        post({ type: 'log', message: `[VTP/WSA] getUserMedia failed: ${errName}` });
+        // Auto-fallback to FFmpeg so the user can still record
+        transcriptionMode = 'ffmpeg';
+        updateModeButton();
+        post({ type: 'setTranscriptionMode', mode: 'ffmpeg' });
+        setStatus('idle', `⚠ SR mic unavailable (${errName}) — switched to FFmpeg`);
+        recognition = null;
+        post({ type: 'startRecording' }); // start FFmpeg instead
         return;
       }
     }
