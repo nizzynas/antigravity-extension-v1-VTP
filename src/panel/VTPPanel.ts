@@ -197,7 +197,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     const base64 = buffer.toString('base64');
     try {
       const genai = new GoogleGenerativeAI(apiKey);
-      const model = genai.getGenerativeModel({ model: 'gemini-2.0-flash' });
+      const model = genai.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
       const result = await this.withRetry(() =>
         model.generateContent([
@@ -382,7 +382,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private ensurePipeline(apiKey: string): void {
-    const model = vscode.workspace.getConfiguration('vtp').get<string>('elaborationModel', 'gemini-2.0-flash');
+    const model = vscode.workspace.getConfiguration('vtp').get<string>('elaborationModel', 'gemini-2.5-flash');
     if (!this.intentProcessor)  this.intentProcessor  = new IntentProcessor(apiKey);
     if (!this.commandExecutor)  this.commandExecutor  = new CommandExecutor(this.commandRegistry.getCommands());
     if (!this.promptElaborator) this.promptElaborator = new PromptElaborator(apiKey, model);

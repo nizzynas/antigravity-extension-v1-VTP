@@ -10,7 +10,7 @@ import { WorkspaceContext, MatchedConversation } from '../types';
 export class PromptElaborator {
   private readonly model;
 
-  constructor(apiKey: string, modelName = 'gemini-2.0-flash') {
+  constructor(apiKey: string, modelName = 'gemini-2.5-flash') {
     const genAI = new GoogleGenerativeAI(apiKey);
     this.model = genAI.getGenerativeModel({ model: modelName });
   }
