@@ -2,7 +2,7 @@
   "name": "vtp-voice-prompt",
   "displayName": "VTP — Voice to Prompt",
   "description": "Hands-free AI coding for VS Code. Dictate, enhance with Gemini, and send prompts into Antigravity — entirely by voice.",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "icon": "media/icon.png",
   "publisher": "nizzynas",
   "license": "MIT",
