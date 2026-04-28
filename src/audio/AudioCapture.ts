@@ -99,7 +99,7 @@ export class AudioCapture {
             if (this.onExtendedSilence) {
               this.onExtendedSilence();
             }
-          }, 8000); // 8 seconds of continuous silence → auto-pause
+          }, 15000); // 15 seconds of continuous silence → auto-pause
         }
       }
 

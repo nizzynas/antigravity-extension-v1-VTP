@@ -36,8 +36,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private readonly chatInjector = new ChatInjector();
   private readonly capture = new AudioCapture();
 
-  private ffmpegReady = false;
-  private isPaused   = false;  // true = mic stays on but only wake phrases are processed
+  private ffmpegReady  = false;
+  private isPaused     = false;  // true = mic stays on but only wake phrases are processed
+  private justResumed  = false;  // true = first utterance after a voice-wake, discard if pure wake noise
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -244,57 +245,65 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Called when onSilenceDetected fires while isPaused=true.
-   * Stops FFmpeg to get the audio clip, checks for a wake phrase,
-   * then restarts FFmpeg to keep monitoring.
+   * Wake-phrase monitor loop (runs when isPaused=true).
+   *
+   * WHY fixed 3s window instead of silence detection:
+   * DirectShow on Windows takes 1–2s to initialise. With silence-detection,
+   * the user says "resume" during FFmpeg's init window → we capture silence.
+   * Recording for a guaranteed 3s window gives FFmpeg time to init AND
+   * captures the phrase reliably.
    */
   private async checkForWakePhrase(): Promise<void> {
-    // Stop current recording to capture the audio snippet
-    const result = await this.capture.stop();
-
-    if (!result || !this.isPaused) {
-      // Nothing captured or already resumed manually — restart monitor
-      if (this.isPaused) await this.capture.start();
-      return;
-    }
+    await this.capture.stop(); // clean up current session
+    if (!this.isPaused) return;
 
     const apiKey = await this.secretManager.getApiKey();
-    if (!apiKey) {
-      if (this.isPaused) await this.capture.start();
-      return;
-    }
+    if (!apiKey) return;
 
-    try {
-      const base64 = result.buffer.toString('base64');
-      const genai  = new GoogleGenerativeAI(apiKey);
-      const model  = genai.getGenerativeModel({
-        model: 'gemini-2.5-flash',
-        systemInstruction: 'Transcribe the audio exactly as spoken. Output ONLY the spoken words. If no speech, output [SILENCE].',
-      });
-      const res  = await model.generateContent([
-        { inlineData: { mimeType: result.mimeType, data: base64 } },
-        'Transcribe the audio.',
-      ]);
-      const text = res.response.text().trim().toLowerCase();
-      this.log.appendLine(`[VTP] Wake monitor heard: "${text}"`);
+    // Detach VAD callbacks so they don't fire inside the monitor loop
+    this.capture.onSilenceDetected = null;
+    this.capture.onExtendedSilence = null;
 
-      if (/\b(resume|continue|start|wake up|keep going|i'm back|listen|go|activate)\b/.test(text)) {
-        // Wake phrase detected
-        this.log.appendLine('[VTP] Wake phrase matched — resuming.');
-        this.isPaused = false;
-        this.send({ type: 'resumed' });
-        await this.startRecording();
-        return;
+    this.log.appendLine('[VTP] Wake monitor: say "resume", "continue", or "I\'m back"...');
+
+    while (this.isPaused) {
+      try {
+        await this.capture.start();
+        await new Promise<void>((r) => setTimeout(r, 3000)); // 3s window
+        const result = await this.capture.stop();
+
+        if (!this.isPaused) break;
+        if (!result) continue;
+
+        const base64 = result.buffer.toString('base64');
+        const genai  = new GoogleGenerativeAI(apiKey);
+        const model  = genai.getGenerativeModel({
+          model: 'gemini-2.5-flash',
+          systemInstruction:
+            'Transcribe the audio exactly as spoken. Output ONLY the spoken words. If there is no speech at all, output exactly: [SILENCE]',
+        });
+        const res  = await model.generateContent([
+          { inlineData: { mimeType: result.mimeType, data: base64 } },
+          'Transcribe the audio.',
+        ]);
+        const text = res.response.text().trim().toLowerCase();
+        this.log.appendLine(`[VTP] Wake monitor heard: "${text}"`);
+
+        if (/\b(resume|continue|start|wake up|keep going|i'?m back|listen|go|activate|hey vtp)\b/.test(text)) {
+          this.log.appendLine('[VTP] Wake phrase matched — resuming.');
+          this.isPaused    = false;
+          this.justResumed = true;  // first post-wake utterance may be wake noise
+          this.send({ type: 'resumed' });
+          await this.startRecording(); // re-wires VAD callbacks
+          return;
+        }
+      } catch (err) {
+        this.log.appendLine(`[VTP] Wake monitor error: ${this.formatError(err)}`);
+        await new Promise((r) => setTimeout(r, 500));
       }
-    } catch (err) {
-      this.log.appendLine(`[VTP] Wake monitor error: ${this.formatError(err)}`);
-    }
-
-    // No wake phrase — restart monitor loop
-    if (this.isPaused) {
-      await this.capture.start();
     }
   }
+
 
   // ─── Transcription ────────────────────────────────────────────────────────
 
@@ -341,6 +350,18 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       }
 
       this.send({ type: 'transcriptResult', text });
+
+      // Drop pure wake-phrase noise from the first utterance after a voice-resume.
+      // e.g. user says "resume, I'm back, resume" while testing wake words.
+      if (this.justResumed) {
+        this.justResumed = false;
+        const isWakeNoise = /^[\s.,!?]*((resume|continue|start|wake up|keep going|i'?m back|listen|go|activate|hey vtp)[\s.,!?]*)+$/i.test(text);
+        if (isWakeNoise) {
+          this.log.appendLine(`[VTP] Post-wake noise discarded: "${text}"`);
+          return;
+        }
+      }
+
       await this.onFinalTranscript(text);
     } catch (err) {
       const msg = this.formatError(err);
