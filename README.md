@@ -10,13 +10,27 @@ VTP turns your voice into a full AI coding workflow. Click once to start recordi
 
 ## ✨ Features
 
-- 🎙 **Live transcription** — FFmpeg-powered audio capture with real-time streaming to Gemini, no browser mic permission required
+- 🌐 **Dual transcription engines** — choose between Web Speech API (Google STT, low-latency) or FFmpeg + Gemini. Toggle with a single click in the panel header.
 - 🧠 **Gemini enhancement** — say *"enhance this prompt"* and get a polished, context-aware rewrite inline
 - ✅ **Approve / Reject / Try Again** — review enhancements with buttons or purely by voice
 - 🚀 **Hands-free send** — say *"send it"* and your prompt is injected into Antigravity instantly. No clicking, no copy-paste, nothing.
+- ⏸ **Smart auto-pause** — silence detection in both modes. SR mode uses a JS timer; FFmpeg mode uses FFmpeg VAD. Either way, goes quiet → auto-pauses.
 - ⚡ **Full voice control** — pause, resume, send, clear, enhance — all without touching the mouse
 - 📎 **Workspace context** — automatically reads your open files, active conversation, and workspace name for smarter prompts
 - 🔑 **Secure key storage** — Gemini API key stored in VS Code SecretStorage, never in code or config files
+
+---
+
+## 🎙 Transcription Engines
+
+VTP now supports two transcription engines. You can switch between them at any time using the **`🌐 SR` / `🔧 FFM`** toggle button in the panel header.
+
+| Engine | Button | How it works | Best for |
+|---|---|---|---|
+| **Web Speech API** *(default)* | `🌐 SR` | Browser's built-in Google STT. Near-instant, high accuracy. Requires internet. | Most users |
+| **FFmpeg + Gemini** | `🔧 FFM` | FFmpeg captures audio chunks, Gemini transcribes. Requires FFmpeg on PATH. | Offline / headless |
+
+> **On Windows**, DirectShow is exclusive — only one engine can hold the mic at a time. FFmpeg is still used for **wake-phrase detection during pause**, regardless of which transcription engine is active.
 
 ---
 
@@ -24,11 +38,11 @@ VTP turns your voice into a full AI coding workflow. Click once to start recordi
 
 | Platform | Status |
 |---|---|
-| **Windows** | ✅ Fully supported (FFmpeg via dshow) |
-| macOS | 🔜 Planned (avfoundation backend) |
-| Linux | 🔜 Planned (pulse/alsa backend) |
+| **Windows** | ✅ Fully supported |
+| macOS | 🔜 Planned |
+| Linux | 🔜 Planned |
 
-> FFmpeg must be installed and available on your system PATH.
+> FFmpeg is required for pause/wake monitoring in both modes. It does not need to be installed if you never use the pause feature, but it's strongly recommended.
 
 ---
 
@@ -53,7 +67,7 @@ Open the VTP panel from the Activity Bar, click **KEY**, and paste your Gemini A
 
 ### 4. Start talking
 
-Click the microphone button (or enable VAD for always-on mode) and start dictating.
+Click the microphone button and start dictating. The default engine is **Web Speech API** (`🌐 SR`) — no FFmpeg needed for transcription in this mode.
 
 ---
 
@@ -65,7 +79,7 @@ Click the microphone button (or enable VAD for always-on mode) and start dictati
 | `send it` / `send the prompt` | **Injects directly into Antigravity — hands-free, no click, no paste** |
 | `enhance this prompt` | Rewrites with Gemini. Approve / Reject / Try Again inline |
 | `approve` / `reject` / `try again` | Voice-control the enhancement review |
-| `pause` / `stop listening` | Mutes mic immediately; already-queued speech drains first |
+| `pause` / `stop listening` | Mutes mic; already-spoken speech finishes processing first |
 | `resume` / `continue` / `I'm back` | Wakes from pause |
 | `cancel` / `clear that` | Discards the current transcript buffer |
 | `open the terminal` / `run tests` | IDE commands — runs without touching the prompt |
@@ -76,7 +90,8 @@ Click the microphone button (or enable VAD for always-on mode) and start dictati
 
 | Setting | Default | Description |
 |---|---|---|
-| `vtp.vadMode` | `false` | Always-on voice activity detection |
+| `vtp.transcriptionMode` | `speechRecognition` | Transcription engine: `speechRecognition` (Web Speech API) or `ffmpeg` (FFmpeg + Gemini) |
+| `vtp.vadMode` | `false` | Always-on voice activity detection — auto-pauses after silence |
 | `vtp.language` | `en-US` | Speech recognition language (BCP-47) |
 | `vtp.contextDepth` | `20` | Recent conversation messages passed as context |
 | `vtp.elaborationModel` | `gemini-2.5-flash` | Gemini model used for prompt enhancement |
@@ -86,8 +101,9 @@ Click the microphone button (or enable VAD for always-on mode) and start dictati
 ## 🛠 Built With
 
 - [VS Code Extension API](https://code.visualstudio.com/api)
-- [Google Gemini API](https://ai.google.dev/) — transcription + enhancement
-- [FFmpeg](https://ffmpeg.org/) — low-latency audio capture
+- [Google Gemini API](https://ai.google.dev/) — intent classification + prompt enhancement
+- [Web Speech API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Speech_API) — real-time transcription (SR mode)
+- [FFmpeg](https://ffmpeg.org/) — audio capture + wake monitoring (FFmpeg mode)
 - Vibe coded with [Antigravity](https://antigravity.dev) 🤙
 
 ---
@@ -98,7 +114,8 @@ VTP does not collect, store, or transmit any personal data.
 
 | What | Where it goes |
 |---|---|
-| 🎙 Audio | Captured in-memory, sent to Gemini for transcription, then discarded. Never written to disk. |
+| 🎙 Audio (SR mode) | Processed entirely by your browser's built-in speech engine. Never sent to VTP servers. |
+| 🎙 Audio (FFmpeg mode) | Captured in-memory, sent to Gemini for transcription, then discarded. Never written to disk. |
 | 📝 Transcripts | Held in the panel session only. Gone when you close VTP. |
 | 💬 Prompts | Sent to Antigravity on your local machine. Not stored by VTP. |
 | 🔑 API key | Stored in VS Code SecretStorage (your OS keychain). Never in a file, never leaves your machine. |
