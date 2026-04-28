@@ -1,0 +1,86 @@
+{
+  "name": "vtp-voice-prompt",
+  "displayName": "VTP — Voice to Prompt",
+  "description": "Turn voice commands into rich, context-aware prompts for Antigravity",
+  "version": "0.1.0",
+  "publisher": "vtp",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/private/vtp-voice-prompt" },
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vtp-sidebar",
+          "title": "VTP",
+          "icon": "media/mic.svg"
+        }
+      ]
+    },
+    "views": {
+      "vtp-sidebar": [
+        {
+          "type": "webview",
+          "id": "vtp.panel",
+          "name": "Voice to Prompt"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vtp.openPanel",
+        "title": "VTP: Open Panel"
+      },
+      {
+        "command": "vtp.setApiKey",
+        "title": "VTP: Set Gemini API Key"
+      }
+    ],
+    "configuration": {
+      "title": "VTP — Voice to Prompt",
+      "properties": {
+        "vtp.vadMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable always-on voice activity detection mode"
+        },
+        "vtp.contextDepth": {
+          "type": "number",
+          "default": 20,
+          "description": "Number of recent conversation messages to pass as context"
+        },
+        "vtp.language": {
+          "type": "string",
+          "default": "en-US",
+          "description": "Speech recognition language (BCP-47 tag)"
+        },
+        "vtp.elaborationModel": {
+          "type": "string",
+          "default": "gemini-2.0-flash",
+          "description": "Gemini model used for prompt elaboration"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "webpack --mode production",
+    "watch": "webpack --watch --mode development",
+    "package": "vsce package --out vtp-voice-prompt.vsix",
+    "compile": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.0",
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.4",
+    "@vscode/vsce": "^2.24.0"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0"
+  }
+}

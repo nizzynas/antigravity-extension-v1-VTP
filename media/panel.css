@@ -1,0 +1,330 @@
+:root {
+  --bg: var(--vscode-sideBar-background, #1e1e1e);
+  --surface: var(--vscode-editor-background, #252526);
+  --border: var(--vscode-panel-border, #3c3c3c);
+  --text: var(--vscode-foreground, #cccccc);
+  --text-muted: var(--vscode-descriptionForeground, #858585);
+  --accent: var(--vscode-button-background, #0e639c);
+  --accent-hover: var(--vscode-button-hoverBackground, #1177bb);
+  --danger: #f44747;
+  --success: #4ec9b0;
+  --warning: #dcdcaa;
+  --radius: 6px;
+  --transition: 150ms ease;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  min-height: 100vh;
+}
+
+/* ─── Header ─────────────────────────────────────────────── */
+
+.vtp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+
+.vtp-logo {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+
+.vtp-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.btn-icon {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 7px;
+  transition: border-color var(--transition), color var(--transition);
+}
+
+.btn-icon:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.btn-icon.active {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+/* ─── Context bar ────────────────────────────────────────── */
+
+.context-bar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.context-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Status bar ─────────────────────────────────────────── */
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  border: 1px solid var(--border);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.status-bar.status-listening .status-dot {
+  background: var(--danger);
+  box-shadow: 0 0 6px var(--danger);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.status-bar.status-processing .status-dot {
+  background: var(--warning);
+}
+
+.status-bar.status-ready .status-dot {
+  background: var(--success);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ─── Record button ──────────────────────────────────────── */
+
+.record-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.btn-record {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
+}
+
+.btn-record:hover {
+  border-color: var(--accent);
+  transform: scale(1.05);
+}
+
+.btn-record.recording {
+  border-color: var(--danger);
+  box-shadow: 0 0 16px rgba(244, 71, 71, 0.4);
+  animation: pulse-ring 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse-ring {
+  0%, 100% { box-shadow: 0 0 8px rgba(244, 71, 71, 0.3); }
+  50% { box-shadow: 0 0 20px rgba(244, 71, 71, 0.6); }
+}
+
+.record-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* ─── Sections ───────────────────────────────────────────── */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ─── Transcript box ─────────────────────────────────────── */
+
+.transcript-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  min-height: 48px;
+  max-height: 120px;
+  overflow-y: auto;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.transcript-box .interim {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.transcript-box .final {
+  color: var(--text);
+}
+
+/* ─── Command log ────────────────────────────────────────── */
+
+.command-log {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--success);
+  max-height: 80px;
+  overflow-y: auto;
+}
+
+.command-log .command-entry {
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.command-log .command-entry:last-child {
+  border-bottom: none;
+}
+
+/* ─── Prompt area ────────────────────────────────────────── */
+
+.prompt-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px;
+  resize: vertical;
+  width: 100%;
+  transition: border-color var(--transition);
+}
+
+.prompt-box:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.prompt-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  color: #fff;
+  cursor: pointer;
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 10px;
+  transition: background var(--transition);
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 5px 8px;
+  transition: border-color var(--transition), color var(--transition);
+}
+
+.btn-secondary:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* ─── Spinner ────────────────────────────────────────────── */
+
+.spinner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.spinner-ring {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

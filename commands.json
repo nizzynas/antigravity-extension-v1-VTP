@@ -1,0 +1,17 @@
+[
+  {
+    "triggers": ["start the dev server", "run it", "fire it up", "start the app"],
+    "action": "terminal",
+    "run": "npm run dev"
+  },
+  {
+    "triggers": ["run the tests", "run tests"],
+    "action": "terminal",
+    "run": "npm test"
+  },
+  {
+    "triggers": ["build the project", "build it"],
+    "action": "terminal",
+    "run": "npm run build"
+  }
+]

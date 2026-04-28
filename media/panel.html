@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src {{cspNonce}} 'unsafe-inline'; script-src 'nonce-{{cspNonce}}';"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="{{styleUri}}" />
+  <title>VTP</title>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="vtp-header">
+    <span class="vtp-logo">🎙 VTP</span>
+    <div class="vtp-controls">
+      <button id="btn-vad" class="btn-icon" title="Toggle always-on mode">VAD</button>
+      <button id="btn-settings" class="btn-icon" title="Set API Key">⚙</button>
+    </div>
+  </header>
+
+  <!-- Context badge -->
+  <div class="context-bar">
+    <span class="context-label">📂</span>
+    <span id="context-text" class="context-text">Detecting workspace...</span>
+  </div>
+
+  <!-- Status -->
+  <div id="status-bar" class="status-bar status-idle">
+    <span id="status-dot" class="status-dot"></span>
+    <span id="status-text">Ready — press Record to start</span>
+  </div>
+
+  <!-- Record button -->
+  <div class="record-area">
+    <button id="btn-record" class="btn-record" title="Hold to talk (or toggle in VAD mode)">
+      <span class="mic-icon">🎙</span>
+    </button>
+    <span class="record-hint" id="record-hint">Push to Talk</span>
+  </div>
+
+  <!-- Raw transcript -->
+  <section class="section">
+    <div class="section-label">Transcript</div>
+    <div id="transcript-box" class="transcript-box">Your speech will appear here...</div>
+  </section>
+
+  <!-- Command log -->
+  <section id="command-section" class="section hidden">
+    <div class="section-label">⚡ Commands Fired</div>
+    <div id="command-log" class="command-log"></div>
+  </section>
+
+  <!-- Elaborated prompt -->
+  <section id="prompt-section" class="section hidden">
+    <div class="section-label">✏ Elaborated Prompt</div>
+    <textarea id="prompt-box" class="prompt-box" rows="8" placeholder="Gemini will elaborate your notes here..."></textarea>
+    <div class="prompt-actions">
+      <button id="btn-clear" class="btn-secondary">🗑 Clear</button>
+      <button id="btn-copy" class="btn-secondary">📋 Copy</button>
+      <button id="btn-send" class="btn-primary">▶ Send to Antigravity</button>
+    </div>
+  </section>
+
+  <!-- Elaborating spinner -->
+  <div id="spinner" class="spinner hidden">
+    <div class="spinner-ring"></div>
+    <span>Elaborating with Gemini...</span>
+  </div>
+
+  <script nonce="{{cspNonce}}" src="{{scriptUri}}"></script>
+</body>
+</html>
