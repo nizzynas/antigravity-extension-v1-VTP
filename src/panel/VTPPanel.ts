@@ -45,6 +45,8 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private _restartAfterSend  = false;
   private _vadStop           = false;  // true when stop was triggered by VAD silence
   private _stopping          = false;  // guard against concurrent stopRecording calls
+  /** Incremented on every new startRecording() call — stale chunks from old sessions self-discard. */
+  private _sessionGen        = 0;
   /** Set when a send/pause command is detected mid-stream — skips remaining in-flight chunks. */
   private _cancelChunks      = false;
 
@@ -195,12 +197,13 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this._restartAfterSend  = false;
       this._vadStop           = false;
       this._cancelChunks      = false;
+      const sessionGen        = ++this._sessionGen; // invalidates all in-flight chunks from old sessions
 
       // ── Wire chunk callbacks ────────────────────────────────────────────────
       this.capture.onChunkReady = (chunk) => {
         if (this._cancelChunks) return;
         this._chunkQueue = this._chunkQueue.then(
-          () => this.processLiveChunk(chunk.buffer, chunk.mimeType),
+          () => this.processLiveChunk(chunk.buffer, chunk.mimeType, sessionGen),
         );
       };
 
@@ -474,7 +477,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
    * Transcribes a single 3-second audio chunk and appends it to interimTranscript.
    * Called serially via _chunkQueue so ordering is preserved.
    */
-  private async processLiveChunk(buffer: Buffer, mimeType: string): Promise<void> {
+  private async processLiveChunk(buffer: Buffer, mimeType: string, sessionGen: number): Promise<void> {
+    // ── Stale-session guard ──────────────────────────────────────────────────
+    // If startRecording() was called again since this chunk was queued, discard it.
+    // This prevents words spoken in a previous session from appearing in the current one.
+    if (sessionGen !== this._sessionGen) return;
+
     // ── Early-exit guards ────────────────────────────────────────────────────
     // capture.kill() is the mic-mute mechanism — it stops FFmpeg + the chunk
     // poller so no new onChunkReady events fire after send/pause is detected.
@@ -664,6 +672,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
    *   [ chewing ]  [ RATTLE ]  [SOUND]  [SILENCE]  [ 0m0s ]  [NO SPEECH]
    * Real spoken words are NEVER inside brackets, so we strip ALL [...] tokens.
    */
+  private extractTitle(id: string, rawLog: string): string {
+    const match = rawLog.substring(0, 1000).match(/(?:title|Title)[:\s]+([^\n]{1,80})/);
+    return match ? match[1].trim() : `Conversation ${id.slice(0, 8)}`;
+  }
   private sanitizeTranscription(raw: string): string {
     const LEAK_MARKERS = [
       'Transcribe this audio exactly as spoken',
@@ -1006,9 +1018,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private handleMicDenied(): void {
-    // In chunked mode, FFmpeg is already the primary mic source.
-    // micPermissionDenied from the webview is expected and harmless — ignore.
-    this.log.appendLine('[VTP] Webview mic denied — FFmpeg is active (expected).');
+    // FFmpeg is already the primary mic source — webview denial is expected, nothing to do.
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -1063,9 +1073,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     ]).then(([context, conversation]) => {
       this.cachedContext      = context;
       this.cachedConversation = conversation;
-      const title = conversation?.title ?? 'No matched conversation';
-      this.log.appendLine(`[VTP] Context: workspace="${context.workspaceName}", conv="${title}"`);
-      this.send({ type: 'contextUpdate', workspaceName: context.workspaceName, conversationTitle: title });
+      const title = conversation?.title ?? 'none';
+      const shortTitle = title.length > 60 ? title.slice(0, 57) + '...' : title;
+      this.log.appendLine(`[VTP] Context ready — workspace="${context.workspaceName}", conv="${shortTitle}"`);
+      this.send({ type: 'contextUpdate', workspaceName: context.workspaceName, conversationTitle: shortTitle });
     }).catch((e) => this.log.appendLine(`[VTP] Context error: ${e}`));
   }
 
