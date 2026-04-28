@@ -584,7 +584,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.log.appendLine(`[VTP] Live chunk: "${text}"`);
 
       // ── Send trigger: immediately mute mic, drain queue, inject ────────────
-      if (!this._sendTriggerFired && this._hasSendTrigger(this.interimTranscript)) {
+      // Check both the accumulated text AND the incoming chunk in isolation —
+      // a clean "send the prompt" chunk should fire even if prior chunks were garbled.
+      if (!this._sendTriggerFired && (this._hasSendTrigger(this.interimTranscript) || this._hasSendTrigger(text))) {
         this._sendTriggerFired = true;
         this._restartAfterSend = true;
         this.capture.kill();

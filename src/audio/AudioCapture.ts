@@ -107,7 +107,7 @@ export class AudioCapture {
 
   // ─── Chunked mode (live transcript) ─────────────────────────────────────────
 
-  async startChunked(chunkSeconds = 3, maxSeconds = 300): Promise<void> {
+  async startChunked(chunkSeconds = 2, maxSeconds = 300): Promise<void> {
     // ── Serialize: wait for any in-progress stop or kill before spawning ────────
     // Without this, fire-and-forget callers race with startRecording(), creating
     // multiple FFmpeg processes holding the same DirectShow mic device.
