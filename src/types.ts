@@ -53,7 +53,11 @@ export type PanelMessage =
   | { type: 'openSettings' }
   | { type: 'showInfo' }
   | { type: 'micPermissionDenied' }
-  | { type: 'log'; message: string };
+  | { type: 'log'; message: string }
+  /** Web Speech API live interim — fires word-by-word as the user speaks */
+  | { type: 'speechInterim'; text: string }
+  /** Web Speech API final utterance — one completed sentence for intent processing */
+  | { type: 'speechFinal'; segment: string; committed: string };
 
 
 /** Messages sent FROM the extension host TO the Webview */

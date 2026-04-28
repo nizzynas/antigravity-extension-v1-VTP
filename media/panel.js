@@ -3,13 +3,13 @@
 /**
  * VTP Webview Panel script.
  *
- * Audio pipeline:
- *   - FFmpeg + silencedetect  → 1.5s auto-stop, 8s auto-pause (mic stays on)
- *   - Gemini transcription    → accurate final transcript
- *   - Gemini intent classify  → SEND / ENHANCE / COMMAND / CANCEL
+ * Audio pipeline (v2 — Web Speech API):
+ *   - webkitSpeechRecognition  → real-time word-by-word interim transcript (~200ms)
+ *   - Final result             → sent to extension host for Gemini intent classification
+ *   - Gemini                   → SEND / ENHANCE / COMMAND / CANCEL (no longer used for transcription)
  *
  * Pause/Resume:
- *   - isPaused = true means mic is on but speech is only checked for wake phrases
+ *   - isPaused = true means recognition is stopped; extension host monitors mic for wake phrases
  *   - Voice wake phrases: "resume", "continue", "I'm back", "go", etc.
  *   - Manual ⏸ button also toggles pause
  */
@@ -43,7 +43,155 @@
   let isPaused       = false;
   let vadMode        = false;
   let hasApiKey      = false;
-  let fullTranscript = '';
+
+  /** Committed text from previous completed utterances this session. */
+  let committedText  = '';
+  /** Live interim text for the utterance currently being spoken. */
+  let interimText    = '';
+
+  // ─── Web Speech API setup ──────────────────────────────────────────────────
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null;
+  let recognitionLanguage = 'en-US';
+
+  /** True while we intentionally stopped recognition (to prevent the onend
+   *  handler from auto-restarting when the user pauses/stops recording). */
+  let intentionalStop = false;
+
+  /** True when the session ended mid-utterance and we need to restart to keep
+   *  continuous recognition alive (browser stops after ~60s of no network). */
+  let shouldRestart = false;
+
+  function buildRecognition() {
+    if (!SpeechRecognition) return null;
+    const r = new SpeechRecognition();
+    r.continuous      = true;   // don't stop after one utterance
+    r.interimResults  = true;   // get live partial results
+    r.maxAlternatives = 1;
+    r.lang            = recognitionLanguage;
+
+    r.onstart = () => {
+      post({ type: 'log', message: '[VTP/WSA] Recognition started.' });
+    };
+
+    r.onresult = (event) => {
+      // Rebuild interimText from the latest results array
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const transcript = result[0].transcript;
+        if (result.isFinal) {
+          // Append finalised utterance to committedText
+          committedText = committedText
+            ? committedText + ' ' + transcript.trim()
+            : transcript.trim();
+          interim = '';
+
+          // Notify extension host with the full committed text so far
+          post({ type: 'speechInterim', text: committedText });
+
+          // Send the final utterance to the extension host for intent processing
+          post({ type: 'speechFinal', segment: transcript.trim(), committed: committedText });
+        } else {
+          interim += transcript;
+        }
+      }
+      interimText = interim;
+
+      // Show committed + live interim in the transcript box
+      renderLiveTranscript();
+    };
+
+    r.onerror = (event) => {
+      // 'no-speech' and 'aborted' are expected — don't surface as errors.
+      if (event.error === 'no-speech' || event.error === 'aborted') return;
+      // 'not-allowed' = mic permission denied
+      if (event.error === 'not-allowed') {
+        post({ type: 'micPermissionDenied' });
+        setStatus('idle', '⚠ Mic permission denied');
+        return;
+      }
+      post({ type: 'log', message: `[VTP/WSA] Error: ${event.error}` });
+      setStatus('idle', `⚠ Speech error: ${event.error}`);
+    };
+
+    r.onend = () => {
+      // Restart unless we deliberately stopped (pause/stop button).
+      if (!intentionalStop && isRecording && !isPaused) {
+        // Small delay to avoid tight restart loops on repeated errors.
+        setTimeout(() => {
+          if (isRecording && !isPaused && recognition) {
+            try { recognition.start(); } catch (_) {}
+          }
+        }, 150);
+      }
+    };
+
+    return r;
+  }
+
+  function startRecognition() {
+    intentionalStop = false;
+    recognition = buildRecognition();
+    if (!recognition) {
+      // Fallback: no Web Speech API — tell extension host to use FFmpeg/Gemini
+      post({ type: 'startRecording' });
+      return;
+    }
+    try {
+      recognition.start();
+      post({ type: 'startRecording' }); // tells host to start FFmpeg for wake-monitor + VAD
+    } catch (e) {
+      post({ type: 'log', message: `[VTP/WSA] Start failed: ${e}` });
+    }
+  }
+
+  function stopRecognition(pause = false) {
+    intentionalStop = true;
+    interimText = '';
+    if (recognition) {
+      try { recognition.stop(); } catch (_) {}
+      recognition = null;
+    }
+    if (pause) {
+      post({ type: 'pauseRecording' });
+    } else {
+      post({ type: 'stopRecording' });
+    }
+  }
+
+  // ─── Transcript rendering ──────────────────────────────────────────────────
+
+  function renderLiveTranscript() {
+    const display = committedText
+      ? (interimText
+          ? committedText + ' <span class="interim" style="opacity:0.55;font-style:italic">' + interimText + '</span>'
+          : committedText)
+      : (interimText
+          ? '<span class="interim" style="opacity:0.55;font-style:italic">' + interimText + '</span>'
+          : '');
+
+    if (display) {
+      transcriptBox.innerHTML = display;
+      transcriptBox.classList.add('has-content');
+    } else {
+      transcriptBox.textContent = 'Your speech will appear here...';
+      transcriptBox.classList.remove('has-content');
+    }
+  }
+
+  function renderTranscript(text) {
+    if (text) {
+      committedText = text;
+      interimText   = '';
+      renderLiveTranscript();
+    } else {
+      committedText = '';
+      interimText   = '';
+      transcriptBox.textContent = 'Your speech will appear here...';
+      transcriptBox.classList.remove('has-content');
+    }
+  }
 
   // ─── Animated recording dots ───────────────────────────────────────────────
   let dotTimer = null;
@@ -92,6 +240,8 @@
     isPaused = active;
     if (active) {
       stopDots();
+      interimText = '';
+      renderLiveTranscript();
       setStatus('paused', '⏸ Paused — say "resume" or click ▶');
       btnPause.textContent = '▶';
       btnPause.title = 'Resume recording';
@@ -109,16 +259,6 @@
     }
   }
 
-  function renderTranscript() {
-    if (fullTranscript) {
-      transcriptBox.textContent = fullTranscript;
-      transcriptBox.classList.add('has-content');
-    } else {
-      transcriptBox.textContent = 'Your speech will appear here...';
-      transcriptBox.classList.remove('has-content');
-    }
-  }
-
   function addCommandEntry(text) {
     commandSection.classList.remove('hidden');
     const el = document.createElement('div');
@@ -129,11 +269,12 @@
   }
 
   function clearAll() {
-    fullTranscript = '';
+    committedText = '';
+    interimText   = '';
     isPaused = false;
     promptBox.value = '';
     commandLog.innerHTML = '';
-    renderTranscript();
+    renderTranscript('');
     promptSection.classList.add('hidden');
     commandSection.classList.add('hidden');
     spinner.classList.add('hidden');
@@ -153,6 +294,7 @@
     switch (msg.type) {
       case 'settings':
         vadMode = msg.vadMode;
+        recognitionLanguage = msg.language || 'en-US';
         btnVad.classList.toggle('active', vadMode);
         recordHint.textContent = vadMode ? 'Auto-stops on silence' : 'Push to Talk';
         break;
@@ -176,17 +318,14 @@
         break;
 
       case 'vadAutoStop':
-        setStatus('processing', 'Silence detected — transcribing...');
+        // In WSA mode, the send trigger fires and mic restarts automatically.
+        // Just update status briefly.
+        setStatus('processing', 'Processing...');
         break;
 
       case 'recordingStopped':
         setRecording(false);
-        if (!isPaused) {
-          if (!fullTranscript) {
-            transcriptBox.innerHTML = '<span class="interim">Transcribing…</span>';
-          }
-          setStatus('processing', 'Transcribing…');
-        }
+        if (!isPaused) setStatus('processing', 'Processing…');
         break;
 
       case 'paused':
@@ -200,14 +339,18 @@
 
       case 'resumed':
         setPaused(false);
+        // Restart Web Speech API recognition after resume
+        if (!recognition) startRecognition();
+        break;
+
+      case 'wakeReady':
+        setStatus('paused', '🎙 Listening for "resume"...');
         break;
 
       case 'transcriptResult':
-        if (msg.text) {
-          fullTranscript = msg.text;
-          renderTranscript();
-          if (!isPaused) setStatus('idle', 'Ready — press Record');
-        }
+        // Extension host sends the committed prompt buffer (after cancel/send/etc.)
+        renderTranscript(msg.text);
+        if (!isPaused) setStatus('idle', 'Ready — press Record');
         break;
 
       case 'intentResult':
@@ -253,10 +396,12 @@
       return;
     }
     if (isRecording) {
-      post({ type: 'stopRecording' });
+      stopRecognition(false);
       setRecording(false);
     } else {
-      post({ type: 'startRecording' });
+      committedText = '';
+      interimText   = '';
+      startRecognition();
       setStatus('listening', 'Starting…');
     }
   });
@@ -265,7 +410,7 @@
     if (isPaused) {
       post({ type: 'resumeRecording' });
     } else {
-      post({ type: 'pauseRecording' });
+      stopRecognition(true); // stop recognition + tell host to pause
     }
   });
 
@@ -274,10 +419,11 @@
     btnVad.classList.toggle('active', vadMode);
     recordHint.textContent = vadMode ? 'Auto-stops on silence' : 'Push to Talk';
     if (vadMode && !isRecording && !isPaused) {
-      post({ type: 'startRecording' });
+      committedText = '';
+      interimText   = '';
+      startRecognition();
     } else if (!vadMode && isRecording) {
-      setStatus('idle', 'Stopping…');
-      post({ type: 'stopRecording' });
+      stopRecognition(false);
     }
   });
 
