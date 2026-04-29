@@ -57,7 +57,10 @@ export type PanelMessage =
   /** User clicked the context card — open the conversation picker */
   | { type: 'selectContext' }
   /** Enhancement review decision: approve keeps enhanced, reject restores original, regenerate re-elaborates */
-  | { type: 'enhancementDecision'; action: 'approve' | 'reject' | 'regenerate' };
+  | { type: 'enhancementDecision'; action: 'approve' | 'reject' | 'regenerate' }
+  /** User clicked the DG button to manage their optional Deepgram API key */
+  | { type: 'manageDeepgramKey' };
+
 
 
 /** Messages sent FROM the extension host TO the Webview */
@@ -74,6 +77,9 @@ export type ExtensionMessage =
   | { type: 'settings'; vadMode: boolean }
   | { type: 'transcriptResult'; text: string }
   | { type: 'apiKeyStatus'; hasKey: boolean }
+  /** Deepgram key status (optional — only sent when Deepgram is configured) */
+  | { type: 'deepgramKeyStatus'; hasKey: boolean; active: boolean }
+
   | { type: 'recordingStarted' }
   | { type: 'recordingStopped' }
   | { type: 'vadAutoStop' }

@@ -23,6 +23,7 @@
   const btnVad           = document.getElementById('btn-vad');
   const btnApiKey        = document.getElementById('btn-apikey');
   const btnInfo          = document.getElementById('btn-info');
+  const btnDeepgram      = document.getElementById('btn-deepgram');
   const spinner          = document.getElementById('spinner');
   const recordHint       = document.getElementById('record-hint');
   const commandSection   = document.getElementById('command-section');
@@ -39,6 +40,7 @@
   let isPaused     = false;
   let vadMode      = false;
   let hasApiKey    = false;
+  let deepgramActive = false;
   let isReviewing  = false;
   let savedEnhanced = '';
   let committedText = '';
@@ -210,6 +212,14 @@
           : 'No API key — click to add';
         break;
 
+      case 'deepgramKeyStatus':
+        deepgramActive = msg.active && msg.hasKey;
+        btnDeepgram.classList.toggle('dg-active', deepgramActive);
+        btnDeepgram.title = deepgramActive
+          ? 'Deepgram real-time transcription active ⚡ (click to manage)'
+          : 'Enable real-time Deepgram transcription (~300ms, optional free key)';
+        break;
+
       case 'contextUpdate':
         contextWorkspace.textContent = msg.workspaceName || '—';
         contextConv.textContent      = msg.conversationTitle || '—';
@@ -343,9 +353,10 @@
     else if (!vadMode && isRecording)           { stopRecording(false); }
   });
 
-  btnApiKey.addEventListener('click', () => post({ type: 'openSettings' }));
-  btnInfo.addEventListener('click',   () => post({ type: 'showInfo' }));
-  btnContext.addEventListener('click', () => post({ type: 'selectContext' }));
+  btnApiKey.addEventListener('click',   () => post({ type: 'openSettings' }));
+  btnInfo.addEventListener('click',     () => post({ type: 'showInfo' }));
+  btnContext.addEventListener('click',  () => post({ type: 'selectContext' }));
+  btnDeepgram.addEventListener('click', () => post({ type: 'manageDeepgramKey' }));
 
   btnApprove.addEventListener('click', () => post({ type: 'enhancementDecision', action: 'approve' }));
   btnReject.addEventListener('click',  () => post({ type: 'enhancementDecision', action: 'reject' }));

@@ -120,6 +120,28 @@ body {
   cursor: default;
 }
 
+/* Deepgram real-time button */
+.btn-deepgram {
+  border-color: rgba(122, 162, 247, 0.4);
+  color: var(--fg-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.btn-deepgram:hover {
+  border-color: rgba(122, 162, 247, 0.8);
+  background: rgba(122, 162, 247, 0.08);
+  color: #7aa2f7;
+}
+.btn-deepgram.dg-active {
+  border-color: #e0af68;
+  color: #e0af68;
+  box-shadow: 0 0 6px rgba(224, 175, 104, 0.3);
+}
+.btn-deepgram.dg-active:hover {
+  background: rgba(224, 175, 104, 0.08);
+}
+
+
 .vad-dot {
   width: 6px;
   height: 6px;

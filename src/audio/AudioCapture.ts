@@ -27,6 +27,7 @@ export class AudioCapture {
   private _processedChunks = new Set<string>();
   private _chunkIndex = 0;
   private _chunkedMode = false;
+  private _streamingMode = false;
 
   /** Resolves when the current stopChunked() call completes. */
   private _stopInProgress: Promise<void> | null = null;
@@ -40,9 +41,11 @@ export class AudioCapture {
   onSilenceDetected: (() => void) | null = null;
   onSilenceStart:    (() => void) | null = null;   // fires when user STOPS talking (silence_start)
   onExtendedSilence: (() => void) | null = null;
-  onChunkReady: ((chunk: ChunkResult) => void) | null = null;
+  onChunkReady:   ((chunk: ChunkResult) => void) | null = null;
   onChunkSkipped: (() => void) | null = null;
-  onFfmpegLog: ((line: string) => void) | null = null;
+  onFfmpegLog:    ((line: string) => void) | null = null;
+  /** Streaming mode only: called with each raw PCM buffer from stdout */
+  onPcmData:      ((data: Buffer) => void) | null = null;
 
   static async isAvailable(): Promise<boolean> {
     return new Promise((resolve) => {
@@ -169,6 +172,99 @@ export class AudioCapture {
 
     // Poll for completed segment files every 500ms
     this._chunkPollTimer = setInterval(() => this._pollChunks(), 500);
+  }
+
+  // ─── Streaming mode (Deepgram PCM pipe) ─────────────────────────────────────
+
+  /**
+   * Start FFmpeg in raw PCM streaming mode.
+   * Audio is piped to stdout as 16-bit LE mono at 16kHz.
+   * Each stdout data event calls `onPcmData` — wire this to DeepgramTranscriber.send().
+   *
+   * Used only when vtp.transcriptionEngine = 'deepgram'.
+   */
+  async startStreaming(): Promise<void> {
+    if (this._stopInProgress) { await this._stopInProgress; }
+    if (this._dyingProc)      { await this._dyingProc; }
+    if (this.proc) { this.kill(); await this._dyingProc; }
+
+    this._error = null;
+    this._hadSpeech = true; // in streaming mode VAD is handled by Deepgram endpointing
+    this._chunkedMode = false;
+    this._streamingMode = true;
+    this._clearExtendedTimer();
+
+    let inputArgs: string[];
+    if (process.platform === 'win32') {
+      const device = await AudioCapture.getWindowsAudioDevice();
+      inputArgs = ['-f', 'dshow', '-rtbufsize', '100M', '-i', `audio=${device}`];
+    } else if (process.platform === 'darwin') {
+      inputArgs = ['-f', 'avfoundation', '-i', ':0'];
+    } else {
+      inputArgs = ['-f', 'alsa', '-i', 'default'];
+    }
+
+    // Same noise-suppression chain as chunked mode, minus silencedetect
+    // (Deepgram's endpointing=300 handles VAD).
+    const audioFilter = [
+      'highpass=f=80',
+      'afftdn=nf=-25:nt=w',
+    ].join(',');
+
+    const args = [
+      ...inputArgs,
+      '-af', audioFilter,
+      '-ar', '16000', '-ac', '1',
+      '-f', 's16le',   // raw 16-bit LE PCM
+      'pipe:1',        // write to stdout
+    ];
+
+    this._spawnFFmpegStreaming(args);
+  }
+
+  async stopStreaming(): Promise<void> {
+    this._stopInProgress = this._doStopStreaming();
+    await this._stopInProgress;
+    this._stopInProgress = null;
+  }
+
+  private async _doStopStreaming(): Promise<void> {
+    this._clearExtendedTimer();
+    this._streamingMode = false;
+    if (this.proc) {
+      const dying = this.proc;
+      this.proc = null;
+      try { dying.stdin?.write('q'); } catch {}
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(() => { try { dying.kill('SIGKILL'); } catch {} resolve(); }, 1000);
+        dying.once('close', () => { clearTimeout(t); resolve(); });
+      });
+    }
+  }
+
+  /** Spawn FFmpeg with stdout piped (streaming mode). */
+  private _spawnFFmpegStreaming(args: string[]): void {
+    this.proc = cp.spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+
+    // Route stdout PCM data to the callback
+    this.proc.stdout?.on('data', (chunk: Buffer) => {
+      this.onPcmData?.(chunk);
+    });
+
+    // stderr: same logging/error handling as chunked mode
+    this.proc.stderr?.on('data', (d: Buffer) => {
+      const text = d.toString();
+      for (const line of text.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed) this.onFfmpegLog?.(trimmed);
+      }
+      if (/device (is )?not found|unable to open|dshow.*error|could not open|in use/i.test(text)) {
+        this.onFfmpegLog?.('[VTP] ⚠ Mic device busy — is VTP open in another window?');
+      }
+    });
+
+    this.proc.on('error', (e) => { this._error = e.message; this.onFfmpegLog?.(`FFmpeg process error: ${e.message}`); });
+    this.proc.on('close', (code) => { this._clearExtendedTimer(); if (code && code !== 255) this.onFfmpegLog?.(`FFmpeg exited with code ${code}`); });
   }
 
   async stopChunked(): Promise<void> {

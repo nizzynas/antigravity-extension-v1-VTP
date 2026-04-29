@@ -55,4 +55,21 @@ export class SecretManager {
     );
     return (await this.promptForApiKey()) ?? null;
   }
+
+  // ─── Generic secret helpers (for optional integrations like Deepgram) ──────
+
+  /** Read any named secret from VS Code SecretStorage. */
+  async getSecret(key: string): Promise<string | undefined> {
+    return this.secrets.get(key);
+  }
+
+  /** Write any named secret to VS Code SecretStorage (encrypted, local only). */
+  async storeSecret(key: string, value: string): Promise<void> {
+    await this.secrets.store(key, value);
+  }
+
+  /** Delete any named secret from VS Code SecretStorage. */
+  async deleteSecret(key: string): Promise<void> {
+    await this.secrets.delete(key);
+  }
 }

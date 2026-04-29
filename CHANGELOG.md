@@ -4,6 +4,20 @@ All notable changes to VTP — Voice to Prompt are documented here.
 
 ---
 
+## [0.1.17] — 2026-04-28
+### Added
+- **Deepgram real-time transcription engine** — optional, opt-in streaming pipeline using Deepgram nova-2. Reduces transcription latency from ~5s to ~300ms. Requires a __FREE__ Deepgram API key stored locally in VS Code SecretStorage.
+- **⚡ LIVE button** — new header button to enable/disable Deepgram. Clicking opens a guided disclosure + key onboarding flow (data usage, privacy policy, opt-out info). Active state shown with amber glow when Deepgram is running.
+- **Instant voice commands in Deepgram mode** — "send it", "enhance this prompt" etc. are detected on every Deepgram final word result (~300ms) rather than waiting for 3s chunk boundaries.
+- **Graceful fallback** — if Deepgram engine is set but no key is found, automatically falls back to Gemini chunked mode with a log warning.
+- **`vtp.transcriptionEngine` setting** — `gemini` (default) or `deepgram`. Persists across restarts.
+
+### Changed
+- `startRecording` / `stopRecording` now branch on the selected engine, keeping both pipelines cleanly separated.
+- Wake monitor "waiting for speech" log now fires only once per sleep cycle (no more spam).
+
+---
+
 ## [0.1.16] — 2026-04-28
 ### Added
 - **Multi-memory context picker** — click the 📂 context card in the panel to open a multi-select list of all past Antigravity conversations. Check any number of past chats to layer them as supplementary read-only context on top of the auto-detected primary.

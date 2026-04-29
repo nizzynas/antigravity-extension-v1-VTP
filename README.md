@@ -11,6 +11,7 @@ VTP turns your voice into a full AI coding workflow. Click once to start recordi
 ## ✨ Features
 
 - 🎙 **FFmpeg + Gemini pipeline** — audio is captured locally by FFmpeg, denoised, and transcribed by Gemini. No browser dependency, no cloud STT lock-in.
+- ⚡ **Optional Deepgram real-time mode** — drop latency from ~5s to ~300ms with a free Deepgram API key. Completely opt-in. See [Deepgram section](#-deepgram-optional--real-time-transcription) below.
 - 🔇 **Built-in noise suppression** — a 3-stage FFmpeg filter chain (`highpass → afftdn → silencedetect`) strips low-frequency rumble and PC background noise before audio ever reaches Gemini.
 - 🧠 **Gemini enhancement** — say *"enhance this prompt"* and get a polished, context-aware rewrite inline
 - ✅ **Approve / Reject / Try Again** — review enhancements with buttons or purely by voice
@@ -45,6 +46,43 @@ Open the VTP panel from the Activity Bar, click **KEY**, and paste your Gemini A
 ### 4. Start talking
 
 Click the microphone button and start dictating. Audio processes in 3-second chunks — so you'll see the transcript update every few seconds as you speak.
+
+### 5. (Recommended) Enable Deepgram for real-time transcription
+
+By default VTP uses Gemini for transcription, which works offline but has ~4-7s chunk latency. **We recommend enabling Deepgram** — it's free, takes 2 minutes to set up, and drops latency to ~300ms so voice commands feel instant.
+
+Click the **⚡ LIVE** button in the VTP panel header and follow the onboarding. Totally up to you — Gemini mode works fine if you'd rather keep everything local and free of third-party services.
+
+---
+
+## ⚡ Deepgram (Optional) — Real-Time Transcription
+
+By default, VTP uses **FFmpeg + Gemini** for transcription. This works offline (no extra keys) but has ~4-7s of latency per chunk.
+
+**Deepgram** is an optional, opt-in 3rd-party service that reduces this to ~300ms with real-time streaming. A **free API key is all you need** — no credit card required.
+
+To enable it: click the **⚡ LIVE** button in the VTP panel and follow the onboarding flow. Your key is stored in VS Code SecretStorage and is never sent anywhere except Deepgram's API during recording.
+
+### Deepgram Data Usage
+
+> Based on publicly available Deepgram documentation and user discussions (early 2026). See [deepgram.com/privacy](https://deepgram.com/privacy) for the authoritative source.
+
+| Feature | Default | Opt-out |
+|---|---|---|
+| **Transcription** | Audio sent to Deepgram's API during recording | — |
+| **Model training** | Deepgram may use your audio to improve their models (50% discount applied) | Add `mip_opt_out=true` to API requests (discount removed) |
+| **Data selling** | **No** — Deepgram does not sell your voice data | — |
+| **Data retention** | Logs retained ~90 days | Opt-out: data deleted after processing |
+| **Compliance** | HIPAA, GDPR, CCPA, SOC-2 Type 2, TLS 1.3, AES-256 | — |
+
+**Key points:**
+- Deepgram does **not** sell your voice data to third parties
+- You own your data — it's processed under their service agreement
+- The free tier is sufficient for VTP usage
+- For maximum privacy: opt out of model improvement by setting `mip_opt_out=true` (you'll lose the 50% model-improvement discount, but the free tier is unaffected)
+- Enterprise users can use on-premises or VPC deployment to keep data within their own infrastructure
+
+👉 [Get a free Deepgram API key](https://console.deepgram.com) | [Privacy policy](https://deepgram.com/privacy)
 
 ---
 
@@ -102,10 +140,13 @@ Extras are **read-only** — they inform the elaboration but cannot be modified 
 | `vtp.vadMode` | `false` | Always-on VAD — auto-pauses after silence, restarts automatically |
 | `vtp.contextDepth` | `20` | Recent conversation messages passed as context to Gemini |
 | `vtp.elaborationModel` | `gemini-2.5-flash` | Gemini model used for prompt enhancement |
+| `vtp.transcriptionEngine` | `gemini` | `gemini` (default, offline-capable) or `deepgram` (real-time, requires key) |
 
 ---
 
 ## 🔧 How the Audio Pipeline Works
+
+### Gemini Mode (Default)
 
 ```
 Mic → FFmpeg → [highpass=f=80] → [afftdn=nf=-25] → [silencedetect] → WAV chunks
@@ -123,6 +164,20 @@ Mic → FFmpeg → [highpass=f=80] → [afftdn=nf=-25] → [silencedetect] → W
 4. Audio is segmented into **3-second WAV chunks** and sent to Gemini for verbatim transcription
 5. Each chunk's transcript is appended live to the panel as it comes back
 
+### Deepgram Mode (Optional)
+
+```
+Mic → FFmpeg → raw s16le PCM @ 16kHz → WebSocket → Deepgram nova-2
+                                                          ↓
+                                                 Interim results ~300ms
+                                                          ↓
+                                                  Final words committed
+                                                          ↓
+                                                  Live transcript UI
+```
+
+No WAV files written. No chunks. Audio streams directly in real-time for near-instant feedback.
+
 ---
 
 ## 🛠 Built With
@@ -130,6 +185,7 @@ Mic → FFmpeg → [highpass=f=80] → [afftdn=nf=-25] → [silencedetect] → W
 - [VS Code Extension API](https://code.visualstudio.com/api)
 - [Google Gemini API](https://ai.google.dev/) — transcription, intent classification + prompt enhancement
 - [FFmpeg](https://ffmpeg.org/) — audio capture, noise suppression, VAD
+- [Deepgram](https://deepgram.com/) — optional real-time streaming transcription
 - Vibe coded with [Antigravity](https://antigravity.dev) 🤙
 
 ---
@@ -140,12 +196,13 @@ VTP does not collect, store, or transmit any personal data.
 
 | What | Where it goes |
 |---|---|
-| 🎙 Audio | Captured locally by FFmpeg, sent to Gemini for transcription, then discarded. Never written to disk permanently. |
+| 🎙 Audio (Gemini mode) | Captured locally by FFmpeg, sent to Gemini for transcription, then discarded. Never written to disk permanently. |
+| 🎙 Audio (Deepgram mode) | Streamed to Deepgram's API in real-time during recording. See [Deepgram data usage](#deepgram-data-usage) above. |
 | 📝 Transcripts | Held in the panel session only. Gone when you close VTP. |
 | 💬 Prompts | Sent to Antigravity on your local machine. Not stored by VTP. |
-| 🔑 API key | Stored in VS Code SecretStorage (your OS keychain). Never in a file, never leaves your machine. |
+| 🔑 API keys | Stored in VS Code SecretStorage (your OS keychain). Never in a file, never leaves your machine. |
 
-No telemetry. No analytics. No backend.
+No telemetry. No analytics. No VTP backend.
 
 ---
 
