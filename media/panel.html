@@ -1,15 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
-  <meta
-    http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{cspNonce}}'; connect-src https:; media-src *;"
-  />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{cspNonce}}'; connect-src https:; media-src *;" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="{{styleUri}}" />
-  <title>STP — Hands-Free Speech to Prompt</title>
+  <title>Hands-Free Speech to Prompt</title>
 </head>
+
 <body>
 
   <div class="vtp-root">
@@ -56,10 +56,10 @@
         </div>
 
         <!-- Hidden compat stubs (JS still references these for key status) -->
-        <button id="btn-apikey"   class="btn-icon btn-apikey-status"  style="display:none">● KEY</button>
-        <button id="btn-deepgram" class="btn-icon btn-deepgram"        style="display:none">⚡ LIVE</button>
+        <button id="btn-apikey" class="btn-icon btn-apikey-status" style="display:none">● KEY</button>
+        <button id="btn-deepgram" class="btn-icon btn-deepgram" style="display:none">⚡ LIVE</button>
 
-        <button id="btn-mode"   class="btn-icon btn-mode"   title="Conversation flow settings">⚙ Settings</button>
+        <button id="btn-mode" class="btn-icon btn-mode" title="Conversation flow settings">⚙ Settings</button>
         <button id="btn-hotkey" class="btn-icon btn-hotkey" title="Remap shortcut">⌨ KEY</button>
       </div>
     </header>
@@ -106,8 +106,8 @@
       <div class="enhance-voice-hint">🎙 Say <em>"approve"</em>, <em>"reject"</em>, or <em>"try again"</em></div>
       <div class="enhance-actions">
         <button id="btn-approve" class="btn-approve" title="Keep enhanced version">✓ Approve</button>
-        <button id="btn-reject"  class="btn-reject"  title="Restore original">✗ Reject</button>
-        <button id="btn-regen"   class="btn-regen"   title="Generate a new enhancement">🔄 Try Again</button>
+        <button id="btn-reject" class="btn-reject" title="Restore original">✗ Reject</button>
+        <button id="btn-regen" class="btn-regen" title="Generate a new enhancement">🔄 Try Again</button>
       </div>
     </div>
 
@@ -118,7 +118,10 @@
       </summary>
       <table class="glossary-table">
         <thead>
-          <tr><th>Say</th><th>What happens</th></tr>
+          <tr>
+            <th>Say</th>
+            <th>What happens</th>
+          </tr>
         </thead>
         <tbody>
           <tr>
@@ -161,9 +164,12 @@
       <div class="glossary-tip">
         <div class="vc-tip-label">Try it in one breath:</div>
         <div class="vc-examples">
-          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Add a dark mode toggle to this component. Send the prompt.</div>
-          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Explain what this function does. Send it.</div>
-          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Write tests for this file. Send the prompt.</div>
+          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Add a dark mode toggle to this
+            component. Send the prompt.</div>
+          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Explain what this function does. Send
+            it.</div>
+          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Write tests for this file. Send the
+            prompt.</div>
         </div>
       </div>
     </details>
@@ -176,56 +182,57 @@
     <!-- Settings panel (slide-in, hidden by default) -->
     <div id="settings-panel" class="settings-panel hidden">
       <div class="settings-inner">
-      <div class="settings-header">
-        <span class="settings-title">⚙ Flow Settings</span>
-        <button id="settings-close" class="settings-close">✕</button>
-      </div>
-
-      <div class="settings-section">
-        <div class="settings-label">How to start recording</div>
-        <div class="settings-choices">
-          <label class="settings-choice" id="sc-wake">
-            <input type="radio" name="activationMode" value="wake" />
-            <div class="sc-body">
-              <div class="sc-title">🎙 Wake Phrase</div>
-              <div class="sc-desc">Say your phrase to start — hands-free</div>
-            </div>
-          </label>
-          <label class="settings-choice" id="sc-manual">
-            <input type="radio" name="activationMode" value="manual" />
-            <div class="sc-body">
-              <div class="sc-title">👆 Push to Talk</div>
-              <div class="sc-desc">Click button or use keybind to start</div>
-            </div>
-          </label>
+        <div class="settings-header">
+          <span class="settings-title">⚙ Flow Settings</span>
+          <button id="settings-close" class="settings-close">✕</button>
         </div>
-        <div id="wake-phrase-row" class="wake-phrase-row">
-          <label class="settings-sublabel">Wake phrase</label>
-          <input id="settings-wake-input" class="settings-input" type="text" maxlength="40" placeholder="hey antigravity" />
-        </div>
-      </div>
 
-      <div class="settings-section">
-        <div class="settings-label">After sending a prompt</div>
-        <div class="settings-choices">
-          <label class="settings-choice" id="sc-continuous">
-            <input type="radio" name="postSendMode" value="continuous" />
-            <div class="sc-body">
-              <div class="sc-title">🔄 Continuous</div>
-              <div class="sc-desc">Mic auto-restarts — keep talking</div>
-            </div>
-          </label>
-          <label class="settings-choice" id="sc-pause">
-            <input type="radio" name="postSendMode" value="pause" />
-            <div class="sc-body">
-              <div class="sc-title">⏸ Pause &amp; Resume</div>
-              <div class="sc-desc">Goes idle — use wake phrase or button again</div>
-            </div>
-          </label>
+        <div class="settings-section">
+          <div class="settings-label">How to start recording</div>
+          <div class="settings-choices">
+            <label class="settings-choice" id="sc-wake">
+              <input type="radio" name="activationMode" value="wake" />
+              <div class="sc-body">
+                <div class="sc-title">🎙 Wake Phrase</div>
+                <div class="sc-desc">Say your phrase to start — hands-free</div>
+              </div>
+            </label>
+            <label class="settings-choice" id="sc-manual">
+              <input type="radio" name="activationMode" value="manual" />
+              <div class="sc-body">
+                <div class="sc-title">👆 Push to Talk</div>
+                <div class="sc-desc">Click button or use keybind to start</div>
+              </div>
+            </label>
+          </div>
+          <div id="wake-phrase-row" class="wake-phrase-row">
+            <label class="settings-sublabel">Wake phrase</label>
+            <input id="settings-wake-input" class="settings-input" type="text" maxlength="40"
+              placeholder="hey antigravity" />
+          </div>
         </div>
-      </div>
 
-      <button id="settings-save" class="settings-save">Save Settings</button>
+        <div class="settings-section">
+          <div class="settings-label">After sending a prompt</div>
+          <div class="settings-choices">
+            <label class="settings-choice" id="sc-continuous">
+              <input type="radio" name="postSendMode" value="continuous" />
+              <div class="sc-body">
+                <div class="sc-title">🔄 Continuous</div>
+                <div class="sc-desc">Mic auto-restarts — keep talking</div>
+              </div>
+            </label>
+            <label class="settings-choice" id="sc-pause">
+              <input type="radio" name="postSendMode" value="pause" />
+              <div class="sc-body">
+                <div class="sc-title">⏸ Pause &amp; Resume</div>
+                <div class="sc-desc">Goes idle — use wake phrase or button again</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <button id="settings-save" class="settings-save">Save Settings</button>
       </div><!-- /settings-inner -->
     </div><!-- /settings-panel -->
 
@@ -271,9 +278,11 @@
           <span class="ob-step-label">Step 2 of 3</span>
         </div>
         <h2 class="ob-title" id="ob-key-title">Enter your API key</h2>
-        <p class="ob-subtitle" id="ob-key-desc">Your key is stored securely in VS Code SecretStorage and never leaves this machine.</p>
+        <p class="ob-subtitle" id="ob-key-desc">Your key is stored securely in VS Code SecretStorage and never leaves
+          this machine.</p>
         <a class="ob-link" id="ob-key-link" href="#" target="_blank">Get a free key →</a>
-        <input class="ob-input" type="password" id="ob-key-input" placeholder="Paste your API key here" autocomplete="off" />
+        <input class="ob-input" type="password" id="ob-key-input" placeholder="Paste your API key here"
+          autocomplete="off" />
         <p class="ob-hint" id="ob-key-hint"></p>
         <div class="ob-screen-actions">
           <button class="ob-skip" id="ob-skip-key">Skip for now</button>
@@ -301,7 +310,8 @@
             <span class="ob-choice-icon">🎙</span>
             <div class="ob-choice-body">
               <div class="ob-choice-label">Voice Activated</div>
-              <div class="ob-choice-desc">Mic goes idle after each send. Say your wake phrase to start the next prompt. Say "resume" or "I'm back" to resume from pause.</div>
+              <div class="ob-choice-desc">Mic goes idle after each send. Say your wake phrase to start the next prompt.
+                Say "resume" or "I'm back" to resume from pause.</div>
             </div>
           </button>
         </div>
@@ -319,4 +329,5 @@
 
   <script nonce="{{cspNonce}}" src="{{scriptUri}}"></script>
 </body>
+
 </html>
