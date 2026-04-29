@@ -12,6 +12,16 @@ STP is an Antigravity extension that lets you create prompts by voice and fire t
 
 ---
 
+<p align="center">
+  <a href="https://youtu.be/mHLq4UxsS2Y">
+    <img src="https://img.youtube.com/vi/mHLq4UxsS2Y/maxresdefault.jpg" alt="STP Demo Video" width="720" />
+  </a>
+  <br />
+  <em>Watch the demo — click to open on YouTube</em>
+</p>
+
+---
+
 ## How It Works in Practice
 
 ### Basic flow — dictate and send
@@ -244,6 +254,43 @@ STP does not collect, store, or transmit any personal data.
 | API keys | Stored in VS Code SecretStorage (your OS keychain). Never in a file, never leaves your machine. |
 
 No telemetry. No analytics. No STP backend.
+
+---
+
+## Under the Hood
+
+A quick map of the codebase for anyone who wants to contribute, fork, or just understand how it works.
+
+```
+src/
+  extension.ts                   Entry point — registers the webview provider and commands
+  types.ts                       Shared TypeScript interfaces used across modules
+
+  panel/
+    VTPPanel.ts                  State machine, UI orchestration, API key management
+
+  audio/
+    AudioCapture.ts              FFmpeg process management — mic capture, PCM chunking
+    DeepgramTranscriber.ts       Raw WebSocket client for Deepgram nova-2 streaming
+
+  pipeline/
+    IntentProcessor.ts           Classifies each transcript chunk (send / enhance / clean / clear / pause)
+    PromptElaborator.ts          Gemini pass that rewrites a rough transcript into a production-ready prompt
+    CommandExecutor.ts           Executes resolved intents — triggers enhance, clean-up, or send flows
+    ChatInjector.ts              Finds the Antigravity chat input, pastes the final prompt, and submits it
+
+  context/
+    WorkspaceContextCollector.ts Gathers open files, cursor position, and project structure for context
+    ConversationMatcher.ts       Pulls recent Antigravity conversation history to ground the prompt
+
+  commands/
+    CommandRegistry.ts           Maps VS Code command IDs to handler functions
+
+  config/
+    SecretManager.ts             Wraps VS Code SecretStorage for Gemini and Deepgram API keys
+```
+
+**Data flow:** Mic audio flows through `AudioCapture` into either Gemini (chunked) or `DeepgramTranscriber` (streamed). Transcripts are classified by `IntentProcessor`. If the user says "enhance", `PromptElaborator` rewrites the transcript using workspace context from `WorkspaceContextCollector` and conversation history from `ConversationMatcher`. The final prompt is handed to `ChatInjector`, which locates the Antigravity chat panel and submits it.
 
 ---
 
