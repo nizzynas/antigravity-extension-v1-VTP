@@ -4,6 +4,17 @@ All notable changes to STP — Speech to Prompt are documented here.
 
 ---
 
+## [0.1.26] — 2026-04-29
+### Fixed
+- **Wake phrase not reflected in examples** — "hey antigravity" spans in the voice command examples now dynamically update to the user's configured phrase.
+- **Screen 3 references removed button** — subtitle now correctly points to ⚙ Settings instead of the old CONT/WAKE toggle.
+- **Voice Activated description** — now mentions "resume" / "I'm back" as pause-resume triggers.
+
+### Added
+- **Extension keywords** — `voice`, `speech`, `antigravity`, `dictation`, `hands-free`, `speech to prompt`, etc. — makes the extension discoverable in marketplace searches.
+
+---
+
 ## [0.1.25] — 2026-04-29
 ### Fixed
 - **Transcript wiped after pause/resume** — text spoken before saying "pause" in Deepgram mode was being discarded. `onFinalTranscript` now strips the pause keyword and saves the remaining pre-pause content to the prompt buffer before entering monitor mode.

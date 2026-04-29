@@ -2,10 +2,22 @@
     "name": "vtp-voice-prompt",
     "displayName": "STP — Hands-Free Speech to Prompt",
     "description": "Speech-to-prompt for Antigravity. Dictate, enhance with Gemini, and fire prompts into Antigravity — entirely by voice.",
-    "version": "0.1.25",
+    "version": "0.1.26",
     "icon": "media/icon.png",
     "publisher": "nizzynas",
     "license": "MIT",
+    "keywords": [
+        "antigravity",
+        "voice",
+        "speech",
+        "dictation",
+        "hands-free",
+        "ai",
+        "prompt",
+        "voice coding",
+        "speech to prompt",
+        "voice to prompt"
+    ],
     "repository": {
         "type": "git",
         "url": "https://github.com/nizzynas/antigravity-extension-v1-VTP"
@@ -20,20 +32,6 @@
     "categories": [
         "Other",
         "Machine Learning"
-    ],
-    "keywords": [
-        "speech",
-        "voice",
-        "ai",
-        "gemini",
-        "prompt",
-        "dictation",
-        "speech-to-prompt",
-        "voice-to-prompt",
-        "voice-to-code",
-        "antigravity",
-        "stp",
-        "vtp"
     ],
     "activationEvents": [
         "onStartupFinished"
@@ -89,7 +87,10 @@
                 },
                 "vtp.activationMode": {
                     "type": "string",
-                    "enum": ["wake", "manual"],
+                    "enum": [
+                        "wake",
+                        "manual"
+                    ],
                     "enumDescriptions": [
                         "Say your wake phrase to start recording (e.g. \"hey antigravity\").",
                         "Press the button or keybind to start recording (Push to Talk)."
@@ -99,7 +100,10 @@
                 },
                 "vtp.postSendMode": {
                     "type": "string",
-                    "enum": ["continuous", "pause"],
+                    "enum": [
+                        "continuous",
+                        "pause"
+                    ],
                     "enumDescriptions": [
                         "Mic auto-restarts after each send so you can keep dictating immediately.",
                         "Mic goes idle after each send. Use your activation method to start the next prompt."
