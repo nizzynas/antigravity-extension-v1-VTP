@@ -1,8 +1,8 @@
 {
     "name": "vtp-voice-prompt",
-    "displayName": "Hands-Free Speech to Prompt",
+    "displayName": "STP — Speech to Prompt",
     "description": "Speech-to-prompt for Antigravity. Dictate, enhance with Gemini, and fire prompts into Antigravity — entirely by voice.",
-    "version": "0.1.27",
+    "version": "0.1.28",
     "icon": "media/icon.png",
     "publisher": "nizzynas",
     "license": "MIT",
@@ -16,7 +16,8 @@
         "prompt",
         "voice coding",
         "speech to prompt",
-        "voice to prompt"
+        "voice to prompt",
+        "stp"
     ],
     "repository": {
         "type": "git",
@@ -78,7 +79,7 @@
             }
         ],
         "configuration": {
-            "title": "Hands-Free Speech to Prompt",
+            "title": "STP — Speech to Prompt",
             "properties": {
                 "vtp.vadMode": {
                     "type": "boolean",
