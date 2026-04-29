@@ -324,6 +324,15 @@ export class VTPPanel implements vscode.WebviewViewProvider {
           this.log.appendLine('[VTP] VAD stop -- restarting for continuous listening.');
           void this.startRecording();
         }
+      } else if (this.isPaused) {
+        // Voice command pause (Deepgram) -- _vadStop was not set, so launch wake monitor here
+        this.log.appendLine('[VTP] Voice-paused -- launching wake monitor (say resume).');
+        void this.checkForWakePhrase();
+      } else if (!hasSpeech && !this._restartAfterSend) {
+        // No speech, no pending action (e.g. manual stop in Deepgram mode with empty buffer).
+        // Nothing will ever send transcriptResult, so resolve the UI's "Processing…" state now.
+        this.log.appendLine('[VTP] No speech on stop -- flushing UI to idle.');
+        this.send({ type: 'transcriptResult', text: this.promptBuffer });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -383,9 +392,69 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.send({ type: 'transcriptResult', text: '' });
       return;
     }
+
+    // ── Clean / scrub command ─────────────────────────────────────────────────
+    const CLEAN_CMD = /\b(clean\s+it\s+up|clean\s+(this|that|the\s+prompt)\s+up|clean\s+up(\s+(the\s+)?(prompt|transcript|that|this))?|scrub\s+(that|this|it|the\s+prompt)|tidy\s+(this|that|it)\s+up)\b/i;
+    if (CLEAN_CMD.test(text) || CLEAN_CMD.test(accumulated)) {
+      this.log.appendLine('[VTP] Clean command (Deepgram) -- running cleanup pass.');
+      this.capture.kill();
+      void this.stopRecording();
+      void this.cleanAndApply();
+      return;
+    }
   }
 
+  private async cleanAndApply(): Promise<void> {
+    const text = (this.promptBuffer || this.interimTranscript).trim();
+    if (!text) {
+      this.log.appendLine('[VTP] Clean: nothing in buffer, skipping.');
+      return;
+    }
 
+    this.log.appendLine(`[VTP] Clean: running cleanup pass on ${text.length} chars.`);
+
+    const apiKey = await this.secretManager.getApiKey();
+    if (!apiKey) {
+      this.send({ type: 'error', message: 'No API key set. Click KEY to add one.' });
+      return;
+    }
+
+    try {
+      const genai = new GoogleGenerativeAI(apiKey);
+      const model = genai.getGenerativeModel({
+        model: 'gemini-2.5-flash',
+        systemInstruction: [
+          'You are a transcript cleanup service.',
+          'Your ONLY job is to remove noise from the user\'s dictated text.',
+          'Remove: filler words (um, uh, like, you know, basically, so, right, I mean, kinda, sorta),',
+          '         profanity unless it is clearly intentional and part of the request,',
+          '         off-topic conversational tangents (e.g. talking to someone who walked in).',
+          'NEVER add, rephrase, expand, or reorder the real content.',
+          'NEVER add commentary or explanations.',
+          'Output ONLY the cleaned text. If nothing needs cleaning, output the text unchanged.',
+        ].join(' '),
+        generationConfig: { temperature: 0 },
+      });
+
+      const result = await model.generateContent([
+        `Clean up this dictated text:\n\n${text}`,
+      ]);
+
+      const cleaned = result.response.text().trim();
+      if (!cleaned) {
+        this.log.appendLine('[VTP] Clean: Gemini returned empty — keeping original.');
+        return;
+      }
+
+      this.log.appendLine(`[VTP] Clean: done. "${cleaned}"`);
+      this.promptBuffer = cleaned;
+      this.interimTranscript = '';
+      this.send({ type: 'transcriptResult', text: this.promptBuffer });
+    } catch (err) {
+      this.log.appendLine(`[VTP] Clean error: ${this.formatError(err)}`);
+      this.send({ type: 'error', message: 'Cleanup failed — buffer unchanged.' });
+    }
+  }
 
   /**
    * Pauses recording  ” keeps FFmpeg alive in monitor mode.
@@ -937,11 +1006,21 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
 
     // "Clear transcript", "clear the buffer", "clear that", "reset transcript", "start over"
-    if (/\b(clear(\s+the)?\s+(transcript|buffer|prompt)|clear\s+that|reset(\s+the)?\s+(transcript|buffer|prompt)|start\s+over)\b/i.test(segment)) {
+    // MUST be anchored (^...$) — otherwise "Clear that. Perfect. Okay. So for availabilities..."
+    // would wipe the buffer because "clear that" appears at the start of a long sentence.
+    if (/^[\s.,!?]*(clear(\s+(the\s+)?(transcript|buffer|prompt|that|this))?|reset(\s+the)?\s+(transcript|buffer|prompt)|start\s+over)[\s.,!?]*$/i.test(segment)) {
       this.promptBuffer = '';
       this.interimTranscript = '';
       this.send({ type: 'transcriptResult', text: '' });
       this.log.appendLine('[VTP] Voice command: clear transcript.');
+      return;
+    }
+
+    // "Clean it up", "scrub that" — strip filler/noise without rewriting content
+    const CLEAN_TRIGGER = /\b(clean\s+it\s+up|clean\s+(this|that|the\s+prompt)\s+up|clean\s+up(\s+(the\s+)?(prompt|transcript|that|this))?|scrub\s+(that|this|it|the\s+prompt)|tidy\s+(this|that|it)\s+up)\b/i;
+    if (CLEAN_TRIGGER.test(segment)) {
+      this.log.appendLine('[VTP] Voice command: clean transcript (Gemini mode).');
+      void this.cleanAndApply();
       return;
     }
 

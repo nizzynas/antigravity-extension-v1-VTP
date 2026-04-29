@@ -4,7 +4,24 @@ All notable changes to VTP — Voice to Prompt are documented here.
 
 ---
 
-## [0.1.17] — 2026-04-28
+## [0.1.20] — 2026-04-29
+### Fixed
+- **"Clear that" wiping mid-sentence dictation** — the clear command regex in Gemini chunked mode was unanchored (`\b` match), so saying "Clear that. Perfect. Okay. So for availabilities..." as part of a long dictation would wipe the entire buffer when the final transcript was assembled. Regex is now anchored (`^...$`) — the entire segment must be the clear command, matching the Deepgram mode behaviour.
+
+---
+
+## [0.1.19] — 2026-04-29
+### Added
+- **"Clean it up" / "scrub that" voice command** — strips filler words, profanity, and off-topic noise from the buffer via a tightly constrained Gemini pass. Never expands or rewrites — only removes. Works in both Gemini chunked and Deepgram streaming modes.
+- **Voice command reference updated** — panel glossary now lists `pause`, `mute`, `stop listening`, `clean it up`, `scrub that`, and includes a note that commands fire ~10x faster in Deepgram mode.
+
+### Fixed
+- **Resume after voice pause** — saying "pause" in Deepgram mode no longer leaves the mic stuck with no way to resume. The wake monitor now launches correctly after any voice-triggered pause (not just VAD auto-pauses).
+- **Infinite "Processing…" on manual stop** — clicking stop in Deepgram mode with an empty buffer no longer leaves the UI spinning forever. A `transcriptResult` flush is sent to settle the panel back to idle.
+
+---
+
+## [0.1.18] — 2026-04-29
 ### Added
 - **Deepgram real-time transcription engine** — optional, opt-in streaming pipeline using Deepgram nova-2. Reduces transcription latency from ~5s to ~300ms. Requires a __FREE__ Deepgram API key stored locally in VS Code SecretStorage.
 - **⚡ LIVE button** — new header button to enable/disable Deepgram. Clicking opens a guided disclosure + key onboarding flow (data usage, privacy policy, opt-out info). Active state shown with amber glow when Deepgram is running.

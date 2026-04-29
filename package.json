@@ -2,7 +2,7 @@
     "name": "vtp-voice-prompt",
     "displayName": "STP — Speech to Prompt",
     "description": "Speech-to-prompt for Antigravity. Dictate, enhance with Gemini, and fire prompts into Antigravity — entirely by voice, inside VS Code.",
-    "version": "0.1.18",
+    "version": "0.1.20",
     "icon": "media/icon.png",
     "publisher": "nizzynas",
     "license": "MIT",

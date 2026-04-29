@@ -94,15 +94,19 @@
           </tr>
           <tr>
             <td><code>enhance this prompt</code></td>
-            <td>Rewrites prompt with Gemini. Approve / Reject / Try Again inline.</td>
+            <td>Rewrites &amp; expands prompt with Gemini. Approve / Reject / Try Again inline.</td>
           </tr>
           <tr>
             <td><code>approve</code> / <code>reject</code> / <code>try again</code></td>
             <td>Voice-control the enhancement review.</td>
           </tr>
           <tr>
+            <td><code>clean it up</code> / <code>scrub that</code></td>
+            <td>Strips filler words &amp; off-topic noise from the buffer — no rewriting, just cleanup. Auto-applies.</td>
+          </tr>
+          <tr>
             <td><code>cancel</code> / <code>clear that</code></td>
-            <td>Discards the current transcript buffer.</td>
+            <td>Discards the entire transcript buffer.</td>
           </tr>
           <tr>
             <td><code>open the terminal</code> / <code>run tests</code></td>
@@ -110,6 +114,10 @@
           </tr>
           <tr class="glossary-divider">
             <td colspan="2"><strong>⏸ Pause &amp; Resume</strong></td>
+          </tr>
+          <tr>
+            <td><code>pause</code> / <code>mute</code> / <code>stop listening</code></td>
+            <td>Immediately mutes mic. Buffer is preserved.</td>
           </tr>
           <tr>
             <td><em>Auto-pause</em></td>
@@ -126,7 +134,8 @@
         </tbody>
       </table>
       <div class="glossary-tip">
-        💡 Combine in one breath: <em>"Build a login page with OAuth. Send the prompt."</em>
+        💡 Combine in one breath: <em>"Build a login page with OAuth. Send the prompt."</em><br>
+        ⚡ Commands trigger faster in Deepgram mode (~300ms vs ~3s chunks).
       </div>
     </div>
 
