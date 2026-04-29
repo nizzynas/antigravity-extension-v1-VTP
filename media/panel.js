@@ -179,6 +179,8 @@
   function setPaused(active) {
     isPaused = active;
     if (active) {
+      btnRecord.classList.remove('recording');  // kill the red ring
+      btnPause.disabled = false;                // re-enable after host confirms
       stopDots();
       interimText = '';
       renderLiveTranscript();
@@ -196,6 +198,7 @@
     }
     updateHint();
   }
+
 
   // ─── Settings panel ────────────────────────────────────────────────────────
   const settingsPanel     = document.getElementById('settings-panel');
@@ -508,9 +511,14 @@
   });
 
   btnPause.addEventListener('click', () => {
-    if (isPaused) { post({ type: 'resumeRecording' }); }
-    else          { stopRecording(true); }
+    if (isPaused) {
+      post({ type: 'resumeRecording' });
+    } else {
+      btnPause.disabled = true;   // block rapid re-clicks until host confirms paused
+      stopRecording(true);
+    }
   });
+
 
   btnVad && btnVad.addEventListener('click', () => {});
 

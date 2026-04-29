@@ -734,9 +734,11 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.send({ type: 'paused' });
       return;
     }
-    this.log.appendLine('[VTP] Pausing — mic stays on in monitor mode (buffer preserved).');
+    this.log.appendLine('[VTP] Manual pause — killing mic and entering wake monitor mode (buffer preserved).');
     this.isPaused = true;
+    this.capture.kill();          // stop FFmpeg / Deepgram stream immediately
     this.send({ type: 'paused' });
+    void this.checkForWakePhrase(); // listen for "resume" / "I'm back"
   }
 
   private async resumeRecording(): Promise<void> {

@@ -4,6 +4,28 @@ All notable changes to STP — Speech to Prompt are documented here.
 
 ---
 
+## [0.1.29] — 2026-04-29
+### Fixed
+- **manual Pause button did not actually pause** — clicking ⏸ left the mic actively recording. Two-part fix: (1) `pauseRecording()` in VTPPanel.ts now calls `capture.kill()` and starts the wake monitor, matching the voice-triggered pause path. (2) UI now removes the red recording ring via `btnRecord.classList.remove('recording')` in `setPaused()`.
+- **Duplicate transcript on rapid pause clicks** — pressing ⏸ multiple times quickly caused the transcript buffer to be processed multiple times, producing doubled/tripled output. The pause button is now disabled immediately on click and only re-enabled once the host confirms the paused state.
+
+---
+
+## [0.1.28] — 2026-04-29
+### Changed
+- **Display name reverted to "STP — Speech to Prompt"** — reverted from "Hands-Free Speech to Prompt" to restore marketplace discoverability when users search "STP".
+- **Added `stp` keyword** — explicit keyword ensures the extension surfaces for direct "STP" searches on Open VSX.
+
+---
+
+## [0.1.27] — 2026-04-29
+### Changed
+- **Display name** set to "Hands-Free Speech to Prompt" (later reverted in 0.1.28 for search discoverability).
+- **Keywords expanded** — added `voice coding`, `speech to prompt`, `voice to prompt`, `stp`, `hands-free` and more to improve Open VSX marketplace discovery.
+- **Configuration title** updated to match display name.
+
+---
+
 ## [0.1.26] — 2026-04-29
 ### Fixed
 - **Wake phrase not reflected in examples** — "hey antigravity" spans in the voice command examples now dynamically update to the user's configured phrase.
