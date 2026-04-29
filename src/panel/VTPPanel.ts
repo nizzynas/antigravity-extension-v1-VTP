@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
 import {
   PanelMessage,
   ExtensionMessage,
@@ -19,6 +20,29 @@ import { CommandRegistry } from '../commands/CommandRegistry';
 import { AudioCapture } from '../audio/AudioCapture';
 import { DeepgramTranscriber, DeepgramOptions } from '../audio/DeepgramTranscriber';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { SettingsManager } from './SettingsManager';
+import { VoiceActivationMonitor } from './VoiceActivationMonitor';
+import {
+  hasSendTrigger,
+  sanitizeTranscription,
+  hasVoiceEnergy,
+  stripSendTrigger,
+  stripEnhanceTrigger,
+  stripFiller,
+  PAUSE_CMD,
+  CLEAR_CMD,
+  CLEAR_FINAL_CMD,
+  CLEAN_CMD,
+  ENHANCE_LIVE,
+  SEND_TRIGGER,
+  ACTION_TRIGGER,
+  WAKE_PHRASE,
+  ENHANCE_APPROVE,
+  ENHANCE_REJECT,
+  ENHANCE_REGEN,
+  extractSideCommand,
+  extractPauseAndSideCmd,
+} from './CommandDetector';
 
 export class VTPPanel implements vscode.WebviewViewProvider {
   public static readonly viewId = 'vtp.panel';
@@ -29,7 +53,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private cachedConversation: MatchedConversation | null = null;
   /** Extra conversations the user manually added as supplementary read-only context. */
   private _extraConversations: ScoredConversation[] = [];
-  /** Tracks interimTranscript.length at the time of last async classify call  ” avoids redundant calls. */
+  /** Tracks interimTranscript.length at the time of last async classify call. */
   private _lastAsyncClassifiedLength = 0;
 
   private intentProcessor: IntentProcessor | null = null;
@@ -41,67 +65,72 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private readonly commandRegistry: CommandRegistry;
   private readonly chatInjector = new ChatInjector();
   private readonly capture = new AudioCapture();
+  private readonly settings: SettingsManager;
+
+  /** File-system watcher on the brain directory. */
+  private _brainWatcher: fs.FSWatcher | null = null;
+  /** VS Code subscription for workspace folder changes. */
+  private _workspaceSub: vscode.Disposable | null = null;
+  /** Debounce timer handle for context refresh. */
+  private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly REFRESH_DEBOUNCE_MS = 2_000;
 
   private ffmpegReady = false;
   private isPaused = false;
   private justResumed = false;
   private interimTranscript = '';
-  // Transcription engine: always FFmpeg + Gemini.
   private _chunkQueue: Promise<void> = Promise.resolve();
-  private _chunkQueueDepth = 0; // tracks pending chunks  ” high values indicate API stall
+  private _chunkQueueDepth = 0;
   private _sendTriggerFired = false;
   private _restartAfterSend = false;
-  private _vadStop = false;  // true when stop was triggered by VAD silence
-  private _stopping = false;  // guard against concurrent stopRecording calls
-  /** Incremented on every new startRecording() call  ” stale chunks from old sessions self-discard. */
+  private _vadStop = false;
+  private _stopping = false;
   private _sessionGen = 0;
-  /** Set when a send/pause command is detected mid-stream  ” skips remaining in-flight chunks. */
   private _cancelChunks = false;
-
-  /** True while waiting for the user to approve / reject / regenerate an enhancement. */
   private _awaitingEnhancementDecision = false;
-  /** The original promptBuffer content saved before elaboration runs. */
   private _originalBufferBeforeEnhance = '';
-  /** Set when 'enhance this prompt' is detected mid-stream  ” mirrors _sendTriggerFired pattern. */
   private _enhanceTriggerFired = false;
-  /** Active Deepgram transcriber instance  ” null when using Gemini engine or when not recording. */
   private _deepgramTranscriber: DeepgramTranscriber | null = null;
+  private _voiceActivationMonitor: VoiceActivationMonitor | null = null;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly secretManager: SecretManager,
     private readonly log: vscode.OutputChannel,
+    private readonly globalState: vscode.Memento,
   ) {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
     const contextDepth = vscode.workspace.getConfiguration('vtp').get<number>('contextDepth', 20);
-
     this.conversationMatcher = new ConversationMatcher(contextDepth);
     this.commandRegistry = new CommandRegistry(workspaceRoot);
     this.commandRegistry.initialize();
-
+    this.settings = new SettingsManager({
+      secretManager: this.secretManager,
+      log: (msg) => this.log.appendLine(msg),
+      send: (msg) => this.send(msg),
+    });
     this.log.appendLine(`[VTP] Panel created. Workspace root: ${workspaceRoot ?? 'none'}`);
   }
 
   async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
     this.view = webviewView;
-    this.log.appendLine('[VTP] Webview resolved  ” panel opening.');
-
+    this.log.appendLine('[VTP] Webview resolved — panel opening.');
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')],
     };
-
     webviewView.webview.html = this.buildHtml(webviewView.webview);
     webviewView.webview.onDidReceiveMessage((msg: PanelMessage) => this.handleMessage(msg));
+    this.startContextWatchers();
+    webviewView.onDidDispose(() => this.stopContextWatchers());
   }
 
-  //   â  Message handler                                                       
+  // ── Message handler ───────────────────────────────────────────────────────
 
   private async handleMessage(msg: PanelMessage): Promise<void> {
     if (msg.type !== 'log') {
       this.log.appendLine(`[VTP] Message received: ${msg.type}`);
     }
-
     switch (msg.type) {
       case 'ready': await this.onPanelReady(); break;
       case 'startRecording': await this.startRecording(); break;
@@ -119,73 +148,308 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       case 'enhancementDecision':
         await this.handleEnhancementDecision(msg.action);
         break;
-      case 'openSettings': await this.handleOpenSettings(); break;
-      case 'showInfo': await this.showApiKeyInfo(); break;
+      case 'openSettings': await this.settings.handleOpenSettings(); break;
+      case 'showInfo': await this.settings.showApiKeyInfo(); break;
       case 'selectContext': await this.openConversationPicker(); break;
-      case 'manageDeepgramKey': await this.handleDeepgramKey(); break;
+      case 'manageDeepgramKey': await this.settings.handleDeepgramKey(); break;
+      case 'openKeybindings':
+        // Opens the keyboard shortcut editor pre-filtered to the VTP toggle
+        // command so the user can remap it without navigating there manually.
+        await vscode.commands.executeCommand(
+          'workbench.action.openGlobalKeybindings',
+          'VTP: Toggle Recording',
+        );
+        this.log.appendLine('[VTP] Opened keyboard shortcut editor for VTP: Toggle Recording.');
+        break;
+      case 'onboardingComplete':
+        await this.handleOnboardingComplete(msg);
+        break;
+      case 'applySettings':
+        await this.handleApplySettings(msg.activationMode, msg.postSendMode, msg.wakePhrase);
+        break;
+      case 'setEngine': {
+        const eng = msg.engine as 'gemini' | 'deepgram';
+        await vscode.workspace.getConfiguration('vtp').update('transcriptionEngine', eng, vscode.ConfigurationTarget.Global);
+        // Restart VAM with the new engine if it was running
+        this._voiceActivationMonitor?.stop();
+        this._voiceActivationMonitor = null;
+        const cfg2 = vscode.workspace.getConfiguration('vtp');
+        if (cfg2.get<string>('activationMode', 'wake') === 'wake' && !this.capture.isRecording() && !this.isPaused) {
+          this._startVoiceActivation(cfg2.get<string>('wakePhrase', 'hey antigravity'));
+        }
+        await this.settings.sendDeepgramKeyStatus();
+        this.log.appendLine(`[VTP] Transcription engine switched to: ${eng}.`);
+        break;
+      }
+      case 'setVoiceActivation': {
+        // Legacy path: map to new 2-axis model
+        const cfg    = vscode.workspace.getConfiguration('vtp');
+        const phrase = msg.wakePhrase || cfg.get<string>('wakePhrase', 'hey antigravity');
+        const activation: 'wake' | 'manual' = msg.enabled ? 'wake' : 'manual';
+        const postSend = cfg.get<'continuous' | 'pause'>('postSendMode', 'pause');
+        await this.handleApplySettings(activation, postSend, phrase);
+        break;
+      }
       case 'log':
         this.log.appendLine(msg.message);
         break;
     }
   }
 
-  //   â  Panel init                                                           â 
+  // ── Panel init ────────────────────────────────────────────────────────────
 
   private async onPanelReady(): Promise<void> {
-    this.log.appendLine('[VTP] Panel ready  ” checking dependencies and context.');
-
+    this.log.appendLine('[VTP] Panel ready — checking dependencies and context.');
     const config = vscode.workspace.getConfiguration('vtp');
-    this.send({
-      type: 'settings',
-      vadMode: config.get<boolean>('vadMode', false),
-    });
-
-    await this.sendApiKeyStatus();
-    await this.sendDeepgramKeyStatus();
+    this.send({ type: 'settings', vadMode: config.get<boolean>('vadMode', false) });
+    await this.settings.sendApiKeyStatus();
+    await this.settings.sendDeepgramKeyStatus();
     await this.checkFFmpeg();
     this.refreshContext();
+
+    // ── Send current flow settings to webview ──────────────────────────────
+    this._sendSettingsStatus(config);
+
+    // ── First-run onboarding ────────────────────────────────────────────────
+    const onboarded = this.globalState.get<boolean>('vtp.onboarded', false);
+    if (!onboarded) {
+      setTimeout(() => this.send({ type: 'showOnboarding' }), 300);
+      this.log.appendLine('[VTP] First run detected — showing onboarding.');
+      return;
+    }
+
+    // ── Start wake monitor if activationMode = wake ─────────────────────────
+    const activationMode = config.get<string>('activationMode', 'wake');
+    if (activationMode === 'wake') {
+      const phrase = config.get<string>('wakePhrase', 'hey antigravity');
+      this._startVoiceActivation(phrase);
+    }
+  }
+
+  private _sendSettingsStatus(config?: vscode.WorkspaceConfiguration): void {
+    const cfg = config ?? vscode.workspace.getConfiguration('vtp');
+    const activationMode = cfg.get<'wake' | 'manual'>('activationMode', 'wake');
+    const postSendMode   = cfg.get<'continuous' | 'pause'>('postSendMode', 'pause');
+    const wakePhrase     = cfg.get<string>('wakePhrase', 'hey antigravity');
+    this.send({ type: 'settingsStatus', activationMode, postSendMode, wakePhrase });
+  }
+
+  // ── Onboarding ───────────────────────────────────────────────────────────
+
+  private async handleOnboardingComplete(msg: Extract<import('../types').PanelMessage, { type: 'onboardingComplete' }>): Promise<void> {
+    this.log.appendLine(`[VTP] Onboarding complete. Engine: ${msg.engine}, activation: ${msg.activationMode}, postSend: ${msg.postSendMode}, phrase: "${msg.wakePhrase}"`);
+
+    const cfg = vscode.workspace.getConfiguration('vtp');
+    await cfg.update('transcriptionEngine', msg.engine, vscode.ConfigurationTarget.Global);
+
+    if (msg.geminiKey) {
+      await this.secretManager.setApiKey(msg.geminiKey);
+      this.log.appendLine('[VTP] Gemini API key saved from onboarding.');
+    }
+    if (msg.deepgramKey) {
+      await this.secretManager.storeSecret('vtp.deepgramApiKey', msg.deepgramKey);
+      this.log.appendLine('[VTP] Deepgram API key saved from onboarding.');
+    }
+
+    // Save new 2-axis flow settings
+    await cfg.update('activationMode', msg.activationMode, vscode.ConfigurationTarget.Global);
+    await cfg.update('postSendMode',   msg.postSendMode,   vscode.ConfigurationTarget.Global);
+    await cfg.update('wakePhrase',     msg.wakePhrase,     vscode.ConfigurationTarget.Global);
+
+    await this.globalState.update('vtp.onboarded', true);
+
+    await this.settings.sendApiKeyStatus();
+    await this.settings.sendDeepgramKeyStatus();
+
+    this._sendSettingsStatus();
+
+    if (msg.activationMode === 'wake') {
+      this._startVoiceActivation(msg.wakePhrase);
+    }
+
+    this.log.appendLine('[VTP] Onboarding data persisted.');
+  }
+
+  // ── Voice Activation ─────────────────────────────────────────────────────
+
+  private _startVoiceActivation(phrase: string): void {
+    // Don't start if mic is already in use by a recording session or pause-monitor
+    if (this.capture.isRecording() || this.isPaused) return;
+    this._voiceActivationMonitor?.stop();
+    const engine = vscode.workspace.getConfiguration('vtp').get<string>('transcriptionEngine', 'gemini') as 'deepgram' | 'gemini';
+    this._voiceActivationMonitor = new VoiceActivationMonitor(
+      this.secretManager,
+      (msg) => this.log.appendLine(msg),
+    );
+    this._voiceActivationMonitor.start(phrase, engine, () => {
+      // Double-check state at callback time — user may have started recording
+      // manually between when the VAM detected energy and when this fires.
+      if (this.capture.isRecording() || this.isPaused) {
+        this.log.appendLine('[VTP] VAM wake: panel already active — ignoring auto-start.');
+        return;
+      }
+      this.log.appendLine('[VTP] Wake phrase detected — starting recording.');
+      void this.startRecording();
+    });
+  }
+
+  private async handleApplySettings(
+    activationMode: 'wake' | 'manual',
+    postSendMode: 'continuous' | 'pause',
+    wakePhrase: string,
+  ): Promise<void> {
+    // ── Reset to idle first — stop whatever is currently active ──────────────
+    // Kill the VAM so the old wake phrase stops listening
+    this._voiceActivationMonitor?.stop();
+    this._voiceActivationMonitor = null;
+
+    // If actively recording, stop it cleanly
+    if (this.capture.isRecording()) {
+      this._stopping = false; // allow a fresh stop
+      this.capture.kill();
+      this._deepgramTranscriber?.disconnect();
+      this._deepgramTranscriber = null;
+      this.interimTranscript = '';
+      this.send({ type: 'recordingStopped' });
+      this.log.appendLine('[VTP] Settings applied mid-recording — stopped capture.');
+    }
+
+    // If in paused/wake-monitor state, force it back to idle
+    if (this.isPaused) {
+      this.isPaused = false;
+      this.send({ type: 'recordingStopped' }); // puts JS side back to idle
+    }
+
+    this.promptBuffer         = '';
+    this.interimTranscript    = '';
+    this._stopping            = false;
+    this._restartAfterSend    = false;
+
+    // ── Persist the new settings ──────────────────────────────────────────────
+    const cfg = vscode.workspace.getConfiguration('vtp');
+    await cfg.update('activationMode', activationMode, vscode.ConfigurationTarget.Global);
+    await cfg.update('postSendMode',   postSendMode,   vscode.ConfigurationTarget.Global);
+    await cfg.update('wakePhrase',     wakePhrase,     vscode.ConfigurationTarget.Global);
+
+    // ── Restart VAM with new phrase if needed ─────────────────────────────────
+    if (activationMode === 'wake') {
+      this._startVoiceActivation(wakePhrase);
+    }
+
+    this.send({ type: 'transcriptResult', text: '' }); // clear displayed transcript
+    this._sendSettingsStatus();
+    this.log.appendLine(`[VTP] Settings applied: activation=${activationMode}, postSend=${postSendMode}, phrase="${wakePhrase}".`);
+  }
+
+  /**
+   * Called after a prompt is injected.
+   *
+   *  postSendMode=continuous → brief 800ms pause then auto-restart recording
+   *  postSendMode=pause      → go idle; if activationMode=wake, restart the VAM
+   *                            so the user can say the wake phrase to start the next prompt
+   */
+  private async _postSendFlow(): Promise<void> {
+    const cfg            = vscode.workspace.getConfiguration('vtp');
+    const postSendMode   = cfg.get<'continuous' | 'pause'>('postSendMode', 'pause');
+    const activationMode = cfg.get<'wake' | 'manual'>('activationMode', 'wake');
+
+    if (postSendMode === 'continuous') {
+      await new Promise<void>((r) => setTimeout(r, 800));
+      if (!this.capture.isRecording()) {
+        this.log.appendLine(`[VTP] Post-send continuous — auto-resuming.`);
+        void this.startRecording();
+      }
+    } else {
+      // Pause mode: go idle
+      if (activationMode === 'wake') {
+        const phrase = cfg.get<string>('wakePhrase', 'hey antigravity');
+        this.log.appendLine('[VTP] Post-send pause/wake — restarting wake monitor.');
+        this._startVoiceActivation(phrase);
+      } else {
+        this.log.appendLine('[VTP] Post-send pause/manual — idle (button or keybind to continue).');
+      }
+    }
+  }
+
+  private startContextWatchers(): void {
+    const brainDir = ConversationMatcher.getBrainDir();
+    if (fs.existsSync(brainDir)) {
+      try {
+        this._brainWatcher = fs.watch(
+          brainDir,
+          { recursive: true, persistent: false },
+          (_event, filename) => {
+            if (filename && (filename.includes('overview') || filename.includes('system_generated'))) {
+              this.scheduleRefresh();
+            }
+          },
+        );
+        this._brainWatcher.on('error', (err) => {
+          this.log.appendLine(`[VTP] Brain watcher error (non-fatal): ${err.message}`);
+        });
+        this.log.appendLine('[VTP] Brain directory watcher started.');
+      } catch (e: any) {
+        this.log.appendLine(`[VTP] Could not watch brain dir (non-fatal): ${e.message}`);
+      }
+    } else {
+      this.log.appendLine('[VTP] Brain directory not found — context watcher skipped.');
+    }
+    this._workspaceSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      this.log.appendLine('[VTP] Workspace folders changed — refreshing context.');
+      this.scheduleRefresh();
+    });
+  }
+
+  private scheduleRefresh(): void {
+    // Don't refresh context mid-session — the context can't change while
+    // we're recording, and the log spam makes debugging harder.
+    if (this.capture.isRecording() || this.isPaused) return;
+    if (this._refreshTimer) clearTimeout(this._refreshTimer);
+    this._refreshTimer = setTimeout(() => {
+      this._refreshTimer = null;
+      this.refreshContext();
+    }, VTPPanel.REFRESH_DEBOUNCE_MS);
+  }
+
+  private stopContextWatchers(): void {
+    if (this._brainWatcher) { this._brainWatcher.close(); this._brainWatcher = null; }
+    if (this._workspaceSub) { this._workspaceSub.dispose(); this._workspaceSub = null; }
+    if (this._refreshTimer) { clearTimeout(this._refreshTimer); this._refreshTimer = null; }
+    this.log.appendLine('[VTP] Context watchers stopped.');
   }
 
   private async checkFFmpeg(): Promise<void> {
     this.ffmpegReady = await AudioCapture.isAvailable();
     this.log.appendLine(`[VTP] FFmpeg available: ${this.ffmpegReady}`);
-
     if (!this.ffmpegReady) {
-      this.send({
-        type: 'error',
-        message: 'FFmpeg not found  ” voice input is disabled. Click to install.',
-      });
+      this.send({ type: 'error', message: 'FFmpeg not found — voice input is disabled. Click to install.' });
       const action = await vscode.window.showWarningMessage(
         'VTP: FFmpeg is required for voice recording but was not found on your PATH.',
-        'Download FFmpeg',
-        'How to Install',
+        'Download FFmpeg', 'How to Install',
       );
       if (action === 'Download FFmpeg') {
         vscode.env.openExternal(vscode.Uri.parse('https://ffmpeg.org/download.html'));
       } else if (action === 'How to Install') {
-        vscode.env.openExternal(
-          vscode.Uri.parse('https://www.wikihow.com/Install-FFmpeg-on-Windows'),
-        );
+        vscode.env.openExternal(vscode.Uri.parse('https://www.wikihow.com/Install-FFmpeg-on-Windows'));
       }
     }
   }
 
-  //   â  Audio capture                                                         
+  // ── Audio capture ─────────────────────────────────────────────────────────
 
   private async startRecording(): Promise<void> {
-    //    FFmpeg mode                                                               â 
     if (!this.ffmpegReady) {
       await this.checkFFmpeg();
       if (!this.ffmpegReady) return;
     }
-
     if (this.capture.isRecording()) {
       this.log.appendLine(`[VTP] Already recording - ignoring startRecording.`);
       return;
     }
-
     try {
-      // Reset state for new session
+      // Stop voice activation monitor while the mic is in use
+      this._voiceActivationMonitor?.stop();
+
       this.isPaused             = false;
       this._stopping            = false;
       this.interimTranscript    = '';
@@ -222,25 +486,33 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         this._deepgramTranscriber = dg;
 
         dg.onReady = () => { this.log.appendLine('[VTP] Deepgram WebSocket connected.'); };
-
         dg.onInterim = (text) => {
           if (this._cancelChunks || this._stopping) return;
-          const display = (this.interimTranscript + ' ' + text).trim();
+          const interim = (this.interimTranscript + ' ' + text).trim();
+          const display = this.promptBuffer ? this.promptBuffer + ' ' + interim : interim;
           this.send({ type: 'transcriptResult', text: display });
         };
-
         dg.onFinal = (text) => {
           if (this._cancelChunks || this._stopping) return;
           const trimmed = text.trim();
           if (!trimmed) return;
           this.log.appendLine(`[VTP] Deepgram final: "${trimmed}"`);
           this.interimTranscript = (this.interimTranscript + ' ' + trimmed).trim();
-          this.send({ type: 'transcriptResult', text: this.interimTranscript });
+          const displayText = this.promptBuffer
+            ? this.promptBuffer + ' ' + this.interimTranscript
+            : this.interimTranscript;
+          this.send({ type: 'transcriptResult', text: displayText });
           this._processTranscriptChunk(trimmed, sessionGen);
         };
-
         dg.onError = (err) => { this.log.appendLine(`[VTP] Deepgram error: ${err.message}`); };
-        this.capture.onPcmData = (pcm) => { dg.send(pcm); };
+        let _pcmFirstLog = false;
+        this.capture.onPcmData = (pcm) => {
+          if (!_pcmFirstLog) {
+            _pcmFirstLog = true;
+            this.log.appendLine(`[VTP DBG] First PCM chunk: ${pcm.length} bytes — audio IS flowing to Deepgram.`);
+          }
+          dg.send(pcm);
+        };
         dg.connect();
         await this.capture.startStreaming();
         this.send({ type: 'recordingStarted' });
@@ -262,21 +534,17 @@ export class VTPPanel implements vscode.WebviewViewProvider {
             await this.processLiveChunk(chunk.buffer, chunk.mimeType, sessionGen);
           });
         };
-
         this.capture.onChunkSkipped = () => {
           this.log.appendLine('[VTP] Chunk skipped -- audio too quiet.');
         };
-
         this.capture.onSilenceStart = () => {
           if (this.isPaused || this._stopping || !this.capture.isRecording()) return;
           this.log.appendLine('[VTP] VAD: silence detected -- auto-stopping.');
           this._vadStop = true;
           void this.stopRecording();
         };
-
         this.capture.onSilenceDetected = null;
         this.capture.onExtendedSilence = null;
-
         await this.capture.startChunked();
         this.send({ type: 'recordingStarted' });
         this.log.appendLine('[VTP] Recording started (Gemini chunked mode).');
@@ -330,14 +598,18 @@ export class VTPPanel implements vscode.WebviewViewProvider {
           void this.startRecording();
         }
       } else if (this.isPaused) {
-        // Voice command pause (Deepgram) -- _vadStop was not set, so launch wake monitor here
         this.log.appendLine('[VTP] Voice-paused -- launching wake monitor (say resume).');
         void this.checkForWakePhrase();
       } else if (!hasSpeech && !this._restartAfterSend) {
-        // No speech, no pending action (e.g. manual stop in Deepgram mode with empty buffer).
-        // Nothing will ever send transcriptResult, so resolve the UI's "Processing…" state now.
         this.log.appendLine('[VTP] No speech on stop -- flushing UI to idle.');
         this.send({ type: 'transcriptResult', text: this.promptBuffer });
+        // If wake mode is active, restart VAM so wake phrase can trigger next session
+        const cfg2 = vscode.workspace.getConfiguration('vtp');
+        if (!this.isPaused && cfg2.get<string>('activationMode', 'wake') === 'wake') {
+          const phrase = cfg2.get<string>('wakePhrase', 'hey antigravity');
+          this.log.appendLine('[VTP] Manual stop — restarting VAM.');
+          this._startVoiceActivation(phrase);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -351,11 +623,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   /** Shared trigger-check logic used by both Gemini chunks and Deepgram finals. */
   private _processTranscriptChunk(text: string, sessionGen: number): void {
     if (sessionGen !== this._sessionGen) return;
-
     const accumulated = this.interimTranscript;
 
-    // ── Send trigger ──────────────────────────────────────────────────────────
-    if (!this._sendTriggerFired && (this._hasSendTrigger(accumulated) || this._hasSendTrigger(text))) {
+    if (!this._sendTriggerFired && (hasSendTrigger(accumulated) || hasSendTrigger(text))) {
       this._sendTriggerFired = true;
       this._restartAfterSend = true;
       this.capture.kill();
@@ -364,9 +634,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       void this.stopRecording();
       return;
     }
-
-    // ── Enhance trigger ───────────────────────────────────────────────────────
-    const ENHANCE_LIVE = /\b(enhance\s+(this|my|the)\s+prompt|enhance\s+prompt|improve\s+(this|my|the)\s+prompt|rewrite\s+(this|my|the)\s+prompt)\b/i;
     if (!this._enhanceTriggerFired && !this._sendTriggerFired && ENHANCE_LIVE.test(accumulated)) {
       this._enhanceTriggerFired = true;
       this.capture.kill();
@@ -375,21 +642,33 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       void this.stopRecording();
       return;
     }
-
-    // ── Pause command — only when the utterance IS the command ────────────────
-    const PAUSE_CMD = /^[\s.,!?]*(pause(\s+(vtp|recording|listening|chat))?|stop\s+listening|mute)[\s.,!?]*$/i;
     if (PAUSE_CMD.test(text)) {
+      // ── Check for combined "pause and [side command]" first ──────────────
+      const pauseSide = extractPauseAndSideCmd(text);
+      if (pauseSide) {
+        this.log.appendLine(`[VTP] Pause+side command detected: "${pauseSide}"`);
+        void this.handleSideCommand(pauseSide);
+      }
       this.log.appendLine('[VTP] Pause command (Deepgram) -- pausing.');
-      this.interimTranscript = ''; // discard the word "pause"
+      this.interimTranscript = this.interimTranscript
+        .replace(PAUSE_CMD, '').replace(/\s{2,}/g, ' ').trim();
       this.capture.kill();
       this.isPaused = true;
       this.send({ type: 'paused' });
       void this.stopRecording();
       return;
     }
-
-    // ── Clear / cancel command ────────────────────────────────────────────────
-    const CLEAR_CMD = /^[\s.,!?]*(clear(\s+(transcript|that|this|the\s+transcript|buffer))?|cancel(\s+(that|this))?)[\s.,!?]*$/i;
+    // ── Standalone side command (keep recording) ─────────────────────────
+    const sideCmd = extractSideCommand(text);
+    if (sideCmd) {
+      this.log.appendLine(`[VTP] Side command (Deepgram): "${sideCmd}"`);
+      void this.handleSideCommand(sideCmd);
+      // Strip the side-command phrase from interimTranscript so it doesn't
+      // accumulate as prompt content
+      this.interimTranscript = this.interimTranscript
+        .replace(text, '').replace(/\s{2,}/g, ' ').trim();
+      return;
+    }
     if (CLEAR_CMD.test(text)) {
       this.log.appendLine('[VTP] Clear command (Deepgram) -- wiping buffer.');
       this.interimTranscript = '';
@@ -397,9 +676,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.send({ type: 'transcriptResult', text: '' });
       return;
     }
-
-    // ── Clean / scrub command ─────────────────────────────────────────────────
-    const CLEAN_CMD = /\b(clean\s+it\s+up|clean\s+(this|that|the\s+prompt)\s+up|clean\s+up(\s+(the\s+)?(prompt|transcript|that|this))?|scrub\s+(that|this|it|the\s+prompt)|tidy\s+(this|that|it)\s+up)\b/i;
     if (CLEAN_CMD.test(text) || CLEAN_CMD.test(accumulated)) {
       this.log.appendLine('[VTP] Clean command (Deepgram) -- running cleanup pass.');
       this.capture.kill();
@@ -415,15 +691,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.log.appendLine('[VTP] Clean: nothing in buffer, skipping.');
       return;
     }
-
     this.log.appendLine(`[VTP] Clean: running cleanup pass on ${text.length} chars.`);
-
     const apiKey = await this.secretManager.getApiKey();
     if (!apiKey) {
       this.send({ type: 'error', message: 'No API key set. Click KEY to add one.' });
       return;
     }
-
     try {
       const genai = new GoogleGenerativeAI(apiKey);
       const model = genai.getGenerativeModel({
@@ -440,17 +713,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         ].join(' '),
         generationConfig: { temperature: 0 },
       });
-
-      const result = await model.generateContent([
-        `Clean up this dictated text:\n\n${text}`,
-      ]);
-
+      const result = await model.generateContent([`Clean up this dictated text:\n\n${text}`]);
       const cleaned = result.response.text().trim();
       if (!cleaned) {
         this.log.appendLine('[VTP] Clean: Gemini returned empty — keeping original.');
         return;
       }
-
       this.log.appendLine(`[VTP] Clean: done. "${cleaned}"`);
       this.promptBuffer = cleaned;
       this.interimTranscript = '';
@@ -461,44 +729,124 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
   }
 
-  /**
-   * Pauses recording  ” keeps FFmpeg alive in monitor mode.
-   * Any speech while paused is checked ONLY for wake phrases.
-   */
   private pauseRecording(): void {
     if (this.isPaused) {
       this.send({ type: 'paused' });
       return;
     }
-    this.log.appendLine('[VTP] Pausing  ” mic stays on in monitor mode (buffer preserved).');
+    this.log.appendLine('[VTP] Pausing — mic stays on in monitor mode (buffer preserved).');
     this.isPaused = true;
     this.send({ type: 'paused' });
   }
 
-  /**
-   * Resumes from pause  ” clears flag so next onSilenceDetected goes through
-   * the normal processing path again.
-   */
   private async resumeRecording(): Promise<void> {
+    // Kill any active FFmpeg process immediately — this unblocks the wake
+    // monitor loop mid-cycle so it exits cleanly instead of racing with us.
+    this.capture.kill();
     this.isPaused = false;
-    this.log.appendLine('[VTP] Resumed  ” restarting to re-wire VAD callbacks.');
-    if (this.capture.isRecording()) {
-      await this.capture.stopChunked();
-    }
+    this.log.appendLine('[VTP] Resumed — restarting to re-wire VAD callbacks.');
     await this.startRecording();
     this.send({ type: 'resumed' });
+    // Re-render the preserved transcript so the user can see what they said
+    // before pausing. startRecording() clears interimTranscript (correct) but
+    // promptBuffer still holds the saved content.
+    if (this.promptBuffer) {
+      this.send({ type: 'transcriptResult', text: this.promptBuffer });
+    }
   }
 
   /**
-   * Wake-phrase monitor loop (runs when isPaused=true).
+   * Handles a voice side command by routing it to Antigravity's MCP toolchain.
    *
-   * WHY fixed 5s window instead of silence detection:
-   * DirectShow on Windows takes 1 “2s to initialise. With silence-detection,
-   * the user says "resume" during FFmpeg's init window   we capture silence.
-   * 5s window gives FFmpeg ~1.5s to init and still leaves ~3.5s of real capture.
+   * For URLs: injects "Please open [url] in the browser" → Antigravity uses
+   *   its chrome-devtools-mcp `new_page` tool, keeping the browser session under
+   *   AI control so the user can follow up with "scroll down", "take a screenshot", etc.
+   *
+   * For non-URL commands: injects the plain instruction as natural language.
+   *   Examples: "search for React hooks", "take a screenshot", "scroll down".
+   */
+  private async handleSideCommand(instruction: string): Promise<void> {
+    this.log.appendLine(`[VTP] Side command raw: "${instruction}"`);
+    this.send({ type: 'commandFired', description: `🔗 Side cmd: ${instruction}` });
+
+    // ── Step 1: normalize spoken URL patterns ──────────────────────────────
+    const normalized = instruction
+      .replace(/\s+dot\s+/gi, '.')
+      .replace(/\s+slash\s+/gi, '/')
+      .replace(/\.\s+([a-z]{2,6})\b/gi, '.$1')
+      .replace(/([a-z])\s+\./gi, '$1.')
+      .replace(/\.\s*([a-z])\s+([a-z])/gi, '.$1$2');
+
+    // ── Step 2: build injection ────────────────────────────────────────────
+    const urlMatch = normalized.match(
+      /(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9\-]+\.(?:com|org|net|io|dev|co|ai|app|gov|edu|uk|ca|au|me|info|tech|us|de|fr|jp|cn|ru|br|in|it|es|nl|se|no|dk|fi|pl|ch|be|at)[^\s]*)/i,
+    );
+
+    let injection: string;
+    if (urlMatch) {
+      const raw = urlMatch[0];
+      const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+      // Explicit MCP framing so the AI uses its browser tools, not a conversational reply.
+      // Generic phrasing works across chrome-devtools-mcp, playwright-mcp, puppeteer-mcp, etc.
+      injection = `[VTP Side Command] Use your MCP browser tools to open: ${url}`;
+      this.log.appendLine(`[VTP] Side command → browser MCP: ${url}`);
+    } else {
+      // Non-URL: tell the AI to use MCP tools without specifying which ones
+      injection = `[VTP Side Command] Use your available MCP tools to: ${normalized}`;
+      this.log.appendLine(`[VTP] Side command → Antigravity MCP: "${normalized}"`);
+    }
+
+    try {
+      await this.chatInjector.inject(injection);
+    } catch (err) {
+      this.log.appendLine(`[VTP] Side command inject error: ${this.formatError(err)}`);
+    }
+  }
+
+  /** Transcribe a short wake-phrase audio chunk via Gemini (fallback/Gemini-engine path). */
+  private async _transcribeWakeGemini(buffer: Buffer, mimeType: string, apiKey: string): Promise<string> {
+    const base64 = buffer.toString('base64');
+    const genai  = new GoogleGenerativeAI(apiKey);
+    const MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-1.5-flash'];
+    for (const modelName of MODELS) {
+      try {
+        const model = genai.getGenerativeModel({
+          model: modelName,
+          systemInstruction:
+            'Transcribe the audio exactly as spoken. Output ONLY the spoken words. ' +
+            'If there is no speech, output exactly: [SILENCE]',
+          generationConfig: { temperature: 0 },
+        });
+        const res = await model.generateContent([
+          { inlineData: { mimeType, data: base64 } },
+          'Transcribe the audio.',
+        ]);
+        return res.response.text().trim();
+      } catch (e) {
+        const s = String(e);
+        const retriable = s.includes('503') || s.includes('500') || s.includes('404') ||
+          s.includes('overloaded') || s.includes('high demand') ||
+          s.includes('Internal error') || s.includes('Service Unavailable') ||
+          s.includes('no longer available');
+        if (retriable) continue;
+        throw e;
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Wake-phrase monitor (runs while isPaused=true).
+   *
+   * When engine=deepgram: uses a live streaming WebSocket connection (same path
+   * as normal recording) so every spoken word is transcribed with <300ms latency.
+   * No more 1.5s polling windows — the word "resume" is caught the moment Deepgram
+   * finalises the utterance.
+   *
+   * When engine=gemini: falls back to the fixed 1.5s capture-and-transcribe loop
+   * (unchanged behaviour from before).
    */
   private async checkForWakePhrase(): Promise<void> {
-    //    Preserve transcript before stopping                                   
     const savedTranscript = this.interimTranscript
       .replace(/\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
     if (savedTranscript) {
@@ -508,173 +856,268 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
     this.interimTranscript = '';
 
-    //    Stop chunked recording before entering single-file wake monitor       â 
     this.capture.onChunkReady = null;
     await this._chunkQueue;
-    await this.capture.stopChunked();
+
+    // Stop whichever capture mode is currently active.
+    const engine = vscode.workspace.getConfiguration('vtp').get<string>('transcriptionEngine', 'gemini');
+    if (engine === 'deepgram') {
+      await this.capture.stopStreaming();
+      this._deepgramTranscriber?.disconnect();
+      this._deepgramTranscriber = null;
+    } else {
+      await this.capture.stopChunked();
+    }
 
     if (!this.isPaused) return;
 
-    const apiKey = await this.secretManager.getApiKey();
-    if (!apiKey) return;
+    // Detach VAD callbacks — not used in wake-monitor mode
+    this.capture.onSilenceDetected  = null;
+    this.capture.onExtendedSilence  = null;
+    this.capture.onSilenceStart     = null;
 
-    // Detach VAD callbacks  ” the wake monitor wires its own below.
-    this.capture.onSilenceDetected = null;
-    this.capture.onExtendedSilence = null;
+    this.log.appendLine('[VTP] Wake monitor active — say "resume" or "I\'m back"...');
 
-    this.log.appendLine('[VTP] Wake monitor: say "resume", "continue", or "I\'m back"...');
+    // ── Deepgram streaming wake monitor ──────────────────────────────────────
+    if (engine === 'deepgram') {
+      await this._checkForWakePhraseDeepgramStreaming();
+      return;
+    }
 
+    // ── Gemini fallback: fixed 1.5s poll loop ────────────────────────────────
     while (this.isPaused) {
       try {
-        //    Wait for speech using FFmpeg silencedetect                         â 
-        // onSilenceDetected fires on silence_END = the moment the user starts
-        // speaking.  We never call Gemini if the mic stays silent/muted.
-        let speechDetectedResolve!: () => void;
-        const speechDetected = new Promise<void>((r) => { speechDetectedResolve = r; });
+        await this.capture.start();
+        await new Promise<void>((r) => setTimeout(r, 1_500));
+        if (!this.isPaused) { this.capture.kill(); break; }
 
-        await this.capture.start();           // single-file mode with silencedetect
-        await new Promise<void>((r) => setTimeout(r, 300)); // DirectShow init
-        if (!this.isPaused) { await this.capture.stop(); break; }
-
-        // onSilenceDetected = silence_END (speech starts after quiet).
-        // onSilenceStart    = silence_START (speech just ended / user paused).
-        // Both can signal "user spoke"  ” wire them both so we don't miss speech
-        // that was already in-progress when FFmpeg started (d=0.5 means any
-        // 0.5s pause fires silence_start, which is enough to confirm speech).
-        this.capture.onSilenceDetected = () => speechDetectedResolve();
-        this.capture.onSilenceStart = () => speechDetectedResolve();
-        this.log.appendLine('[VTP] Wake monitor: waiting for speech...');
-        this.send({ type: 'wakeReady' });
-
-        // Block until speech OR 30s timeout (then cycle FFmpeg to avoid staleness)
-        await Promise.race([
-          speechDetected,
-          new Promise<void>((r) => setTimeout(r, 30_000)),
-        ]);
-
-        if (!this.isPaused) { await this.capture.stop(); break; }
-
-        // Give the user 1.5s to finish the full phrase before stopping.
-        await new Promise<void>((r) => setTimeout(r, 1500));
         const result = await this.capture.stop();
-        this.capture.onSilenceDetected = null;
-        this.capture.onSilenceStart = null;
-
         if (!result) continue;
+        if (!hasVoiceEnergy(result.buffer, 1500)) continue;
 
-        //    Energy gate                                                         
-        if (!this._hasVoiceEnergy(result.buffer)) continue;
+        const apiKey = await this.secretManager.getApiKey();
+        if (!apiKey) continue;
+        const wakeText = await this._transcribeWakeGemini(result.buffer, result.mimeType, apiKey);
 
-        //    Transcribe with Gemini                                               
-        const base64 = result.buffer.toString('base64');
-        const genai = new GoogleGenerativeAI(apiKey);
-
-        const WAKE_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-1.5-flash'];
-        let wakeRaw = '';
-        for (const modelName of WAKE_MODELS) {
-          try {
-            const model = genai.getGenerativeModel({
-              model: modelName,
-              systemInstruction:
-                'Transcribe the audio exactly as spoken. Output ONLY the spoken words. If there is no speech at all, output exactly: [SILENCE]',
-              generationConfig: { temperature: 0 },
-            });
-            const res = await model.generateContent([
-              { inlineData: { mimeType: result.mimeType, data: base64 } },
-              'Transcribe the audio.',
-            ]);
-            wakeRaw = res.response.text().trim();
-            break;
-          } catch (e) {
-            const s = String(e);
-            if (s.includes('503') || s.includes('500') || s.includes('404') ||
-              s.includes('overloaded') || s.includes('high demand') ||
-              s.includes('Internal error') || s.includes('Service Unavailable') ||
-              s.includes('no longer available')) {
-              continue;
-            }
-            throw e;
-          }
-        }
-        const clean = this.sanitizeTranscription(wakeRaw);
+        const clean = sanitizeTranscription(wakeText);
         if (!clean) continue;
         const text = clean.toLowerCase();
         this.log.appendLine(`[VTP] Wake monitor heard: "${text}"`);
 
-        if (/\b(resume|continue|start|wake up|keep going|i'?m back|listen|go|activate|hey vtp)\b/.test(text)) {
-          this.log.appendLine('[VTP] Wake phrase matched  ” resuming.');
-          this.isPaused = false;
-          this.justResumed = true;
-          this.send({ type: 'resumed' });
-
-          //    Compound command: "resume and send the prompt"                   
-          // If the same utterance also contains a send trigger, inject the
-          // buffer immediately without waiting for new dictation.
-          const hasSendInWake = this._hasSendTrigger(text);
-          await this.startRecording();
-          if (hasSendInWake && this.promptBuffer.trim()) {
-            this.log.appendLine('[VTP] Wake+send compound  ” injecting buffer immediately.');
-            await this.injectRaw();
+        if (WAKE_PHRASE.test(text)) {
+          this.log.appendLine('[VTP] Wake phrase matched — resuming.');
+          if (!this.isPaused || this.capture.isRecording()) {
+            this.log.appendLine('[VTP] Wake match: already active — skipping duplicate startRecording.');
+            return;
           }
+          await this._doResume(text);
           return;
         }
       } catch (err) {
         this.log.appendLine(`[VTP] Wake monitor error: ${this.formatError(err)}`);
-        this.capture.kill(); // ensure no orphaned proc before next loop iteration
+        this.capture.kill();
         await new Promise((r) => setTimeout(r, 500));
       }
     }
   }
 
-
-  //   â  Transcription                                                         
-
   /**
-   * Returns true only if the WAV buffer contains audio energy above the voice threshold.
-   * Prevents sending silent/noisy chunks to Gemini, which would cause hallucination.
-   * WAV PCM is 16-bit LE starting at byte 44. Threshold ~200 on a 0 “32767 scale
-   * (~0.6% of max). Low enough to catch quiet/distant speech while still
-   * discarding pure silence and fan/HVAC noise floors.
+   * Deepgram streaming wake monitor — mirrors the normal recording path exactly,
+   * except onFinal checks for a wake phrase instead of routing to the intent pipeline.
+   *
+   * Why this beats the old batch-poll loop:
+   *  - Deepgram's WebSocket transcribes audio in real time with ~300ms latency.
+   *  - No 1.5s windows to miss — every word you say is heard immediately.
+   *  - Uses the exact same FFmpeg→PCM→WebSocket pipeline as normal dictation,
+   *    so there are no new code paths to break.
    */
-  private _hasVoiceEnergy(buf: Buffer, threshold = 600): boolean {
-    const PCM_OFFSET = 44; // standard WAV header size
-    if (buf.length <= PCM_OFFSET + 2) return false;
-    let sumSq = 0;
-    let count = 0;
-    for (let i = PCM_OFFSET; i + 1 < buf.length; i += 2) {
-      const sample = buf.readInt16LE(i);
-      sumSq += sample * sample;
-      count++;
+  private async _checkForWakePhraseDeepgramStreaming(): Promise<void> {
+    const dgKey = await this.secretManager.getSecret('vtp.deepgramApiKey');
+    if (!dgKey) {
+      this.log.appendLine('[VTP] Wake monitor: no Deepgram key — falling back to Gemini poll loop.');
+      await this._wakeGeminiFallback();
+      return;
     }
-    if (count === 0) return false;
-    const rms = Math.sqrt(sumSq / count);
-    return rms >= threshold;
+
+    const dgOpts: DeepgramOptions = {
+      mipOptOut:       vscode.workspace.getConfiguration('vtp').get<boolean>('deepgramMipOptOut', false),
+      profanityFilter: vscode.workspace.getConfiguration('vtp').get<boolean>('deepgramProfanityFilter', false),
+      redact:          vscode.workspace.getConfiguration('vtp').get<string[]>('deepgramRedact', []) as DeepgramOptions['redact'],
+    };
+
+    // Loop so that if Deepgram disconnects unexpectedly while still paused we reconnect.
+    while (this.isPaused) {
+      let resolved = false;
+      const dg = new DeepgramTranscriber(dgKey, dgOpts);
+      this._deepgramTranscriber = dg;
+
+      dg.onReady = () => {
+        this.log.appendLine('[VTP] Wake monitor: Deepgram streaming connected.');
+      };
+
+      dg.onFinal = (text) => {
+        if (!this.isPaused || resolved) return;
+        const clean = sanitizeTranscription(text);
+        if (!clean) return;
+        const lower = clean.toLowerCase();
+        this.log.appendLine(`[VTP] Wake monitor heard: "${lower}"`);
+
+        if (WAKE_PHRASE.test(lower)) {
+          this.log.appendLine('[VTP] Wake phrase matched — resuming.');
+          resolved = true;
+          // Disconnect before resuming so startRecording() gets a clean mic.
+          dg.disconnect();
+          this._deepgramTranscriber = null;
+          void this.capture.stopStreaming().then(() => this._doResume(lower));
+        }
+      };
+
+      dg.onError = (err) => {
+        this.log.appendLine(`[VTP] Wake monitor Deepgram error: ${err.message}`);
+      };
+
+      this.capture.onPcmData = (pcm) => { dg.send(pcm); };
+      dg.connect();
+
+      try {
+        await this.capture.startStreaming();
+      } catch (err) {
+        this.log.appendLine(`[VTP] Wake monitor stream start error: ${this.formatError(err)}`);
+        dg.disconnect();
+        this._deepgramTranscriber = null;
+        await new Promise((r) => setTimeout(r, 500));
+        continue;
+      }
+
+      // Wait until either isPaused flips false (wake matched) or we need to loop.
+      await new Promise<void>((r) => {
+        const check = setInterval(() => {
+          if (!this.isPaused || resolved) { clearInterval(check); r(); }
+        }, 100);
+      });
+
+      // Clean up this streaming session before looping / returning.
+      if (!resolved) {
+        // Still paused but loop iteration ended (shouldn't normally happen) — clean up.
+        dg.disconnect();
+        this._deepgramTranscriber = null;
+        await this.capture.stopStreaming();
+      }
+
+      if (resolved || !this.isPaused) return;
+    }
+  }
+
+  /** Shared resume action: flip state, start recording, restore buffer. */
+  private async _doResume(wakeText: string): Promise<void> {
+    if (!this.isPaused || this.capture.isRecording()) {
+      this.log.appendLine('[VTP] _doResume: already active — skipping.');
+      return;
+    }
+    this.isPaused = false;
+    this.justResumed = true;
+    this.send({ type: 'resumed' });
+    const hasSendInWake = hasSendTrigger(wakeText);
+
+    const savedTranscript = this.interimTranscript;
+    await this.startRecording();
+    if (savedTranscript) {
+      this.interimTranscript = savedTranscript;
+      this.send({ type: 'transcriptResult', text: savedTranscript });
+    } else if (this.promptBuffer) {
+      this.send({ type: 'transcriptResult', text: this.promptBuffer });
+    }
+
+    if (hasSendInWake && this.promptBuffer.trim()) {
+      this.log.appendLine('[VTP] Wake+send compound — injecting buffer immediately.');
+      await this.injectRaw();
+    }
+  }
+
+  /** Gemini-engine fallback poll loop (1.5s windows). */
+  private async _wakeGeminiFallback(): Promise<void> {
+    while (this.isPaused) {
+      try {
+        await this.capture.start();
+        await new Promise<void>((r) => setTimeout(r, 1_500));
+        if (!this.isPaused) { this.capture.kill(); break; }
+
+        const result = await this.capture.stop();
+        if (!result) continue;
+        if (!hasVoiceEnergy(result.buffer, 1500)) continue;
+
+        const apiKey = await this.secretManager.getApiKey();
+        if (!apiKey) continue;
+        const wakeText = await this._transcribeWakeGemini(result.buffer, result.mimeType, apiKey);
+
+        const clean = sanitizeTranscription(wakeText);
+        if (!clean) continue;
+        const text = clean.toLowerCase();
+        this.log.appendLine(`[VTP] Wake monitor heard: "${text}"`);
+
+        if (WAKE_PHRASE.test(text)) {
+          this.log.appendLine('[VTP] Wake phrase matched — resuming.');
+          if (!this.isPaused || this.capture.isRecording()) {
+            this.log.appendLine('[VTP] Wake match: already active — skipping duplicate startRecording.');
+            return;
+          }
+          await this._doResume(text);
+          return;
+        }
+      } catch (err) {
+        this.log.appendLine(`[VTP] Wake monitor error: ${this.formatError(err)}`);
+        this.capture.kill();
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
   }
 
   /**
-   * Transcribes a single 3-second audio chunk and appends it to interimTranscript.
-   * Called serially via _chunkQueue so ordering is preserved.
+   * Transcribes a short audio chunk using Deepgram's prerecorded (batch) HTTP API.
+   * Retained as a utility but no longer used by the Deepgram wake monitor path
+   * (which now uses streaming). Still available as a fallback if needed.
    */
+  private transcribeWakeChunkDeepgram(
+    buffer: Buffer,
+    mimeType: string,
+    apiKey: string,
+  ): Promise<string> {
+    return new Promise((resolve) => {
+      const req = https.request(
+        {
+          method:   'POST',
+          hostname: 'api.deepgram.com',
+          path:     '/v1/listen?model=nova-2&smart_format=true',
+          headers: {
+            'Authorization':  `Token ${apiKey}`,
+            'Content-Type':   mimeType,
+            'Content-Length': buffer.length,
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            try {
+              const body = JSON.parse(Buffer.concat(chunks).toString());
+              const t = body?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? '';
+              resolve(t.trim());
+            } catch { resolve(''); }
+          });
+        },
+      );
+      req.on('error', () => resolve(''));
+      req.write(buffer);
+      req.end();
+    });
+  }
+
+  // ── Transcription ─────────────────────────────────────────────────────────
+
   private async processLiveChunk(buffer: Buffer, mimeType: string, sessionGen: number): Promise<void> {
-    //    Stale-session guard                                                   
-    // If startRecording() was called again since this chunk was queued, discard it.
-    // This prevents words spoken in a previous session from appearing in the current one.
     if (sessionGen !== this._sessionGen) return;
-
-    //    Early-exit guards                                                     
-    // capture.kill() is the mic-mute mechanism  ” it stops FFmpeg + the chunk
-    // poller so no new onChunkReady events fire after send/pause is detected.
-    // Already-queued chunks are intentionally allowed to drain so no dictation is lost.
-    if (buffer.length < 4096) return; // too small  ” partial/empty segment
-
-    //    Local energy gate                                                     â 
-    // Check PCM RMS BEFORE calling Gemini. If the chunk is quiet (background
-    // noise, silence, fan, etc.) Gemini will hallucinate developer content
-    // instead of outputting [SILENCE]. Gating locally is instant and free.
-    if (!this._hasVoiceEnergy(buffer)) {
-      return; // silent chunk  ” discard without API call
-    }
-    //                                                                           
+    if (buffer.length < 4096) return;
+    if (!hasVoiceEnergy(buffer)) return;
 
     const apiKey = await this.secretManager.getApiKey();
     if (!apiKey) return;
@@ -685,19 +1128,14 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       const sysInstruction =
         'You are a verbatim speech-to-text transcriber. ' +
         'Your ONLY job is to write down the exact words spoken in the audio, nothing more. ' +
-        'Output plain text only  ” no timestamps, no VTT format, no SRT format, no speaker labels. ' +
+        'Output plain text only — no timestamps, no VTT format, no SRT format, no speaker labels. ' +
         'Do NOT infer, complete, or expand on what was said. ' +
         'Do NOT generate content that was not clearly spoken in the audio. ' +
         'If the audio contains silence, background noise, or no intelligible speech, output exactly: [SILENCE]';
 
-      // Cascade: 2 active stable models as of April 2026.
-      // 2.0-flash + 1.5-flash are deprecated/removed. 2.5-flash   2.5-flash-lite.
       const CHUNK_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
       let raw: string | null = null;
 
-      // Hard 6s timeout shared across ALL model attempts for this chunk.
-      // If Gemini hangs (network stall, no response), the queue must not freeze  ”
-      // we skip this chunk and let the next one process immediately.
       const CHUNK_TIMEOUT_MS = 10000;
       let chunkTimedOut = false;
       let timeoutHandle: ReturnType<typeof setTimeout>;
@@ -728,12 +1166,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
             break;
           } catch (e) {
             const s = String(e);
-            if (s === 'Error: chunk-timeout') { throw e; } // re-throw to outer catch
+            if (s === 'Error: chunk-timeout') { throw e; }
             if (s.includes('503') || s.includes('500') || s.includes('404') ||
               s.includes('overloaded') || s.includes('high demand') ||
               s.includes('Internal error') || s.includes('Service Unavailable') ||
               s.includes('no longer available')) {
-              continue; // try next model immediately
+              continue;
             }
             throw e;
           }
@@ -742,10 +1180,8 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         clearTimeout(timeoutHandle!);
         const s = String(e);
         if (s.includes('chunk-timeout')) {
-          this.log.appendLine('[VTP] âš  Chunk timed out (10s)  ” skipping to unblock queue.');
-          // Recovery: even though this chunk was dropped, a prior chunk may have
-          // already placed the send/enhance trigger in interimTranscript. Fire now.
-          if (!this._sendTriggerFired && this._hasSendTrigger(this.interimTranscript)) {
+          this.log.appendLine('[VTP] ⚠ Chunk timed out (10s) — skipping to unblock queue.');
+          if (!this._sendTriggerFired && hasSendTrigger(this.interimTranscript)) {
             this._sendTriggerFired = true;
             this._restartAfterSend = true;
             this.capture.kill();
@@ -753,7 +1189,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
             this.send({ type: 'vadAutoStop' });
             void this.stopRecording();
           } else if (!this._enhanceTriggerFired && !this._sendTriggerFired) {
-            const ENHANCE_LIVE = /\b(enhance\s+(this|my|the)\s+prompt|enhance\s+prompt|improve\s+(this|my|the)\s+prompt|rewrite\s+(this|my|the)\s+prompt)\b/i;
             if (ENHANCE_LIVE.test(this.interimTranscript)) {
               this._enhanceTriggerFired = true;
               this.capture.kill();
@@ -764,33 +1199,24 @@ export class VTPPanel implements vscode.WebviewViewProvider {
           }
           return;
         }
-        throw e; // rethrow real errors to outer catch
+        throw e;
       }
       clearTimeout(timeoutHandle!);
 
-      // Re-check after async Gemini call  ” only bail if isPaused has been set
-      // (meaning the pause action already ran from a prior chunk's queue slot).
-      // We do NOT check _cancelChunks because kill() handles muting instead.
       if (this.isPaused) return;
-
       if (raw === null) {
-        this.log.appendLine('[VTP] All models busy  ” chunk skipped.');
+        this.log.appendLine('[VTP] All models busy — chunk skipped.');
         return;
       }
 
-      const text = this.sanitizeTranscription(raw);
+      const text = sanitizeTranscription(raw);
       if (!text || /^\[\s*SILENCE\s*\]$/i.test(text)) return;
 
-      //    Real-time pause detection                                             
-      // Only fire if the entire chunk IS a pause command.
-      // Kill the mic immediately so no new audio comes in, then drain the queue
-      // so all already-spoken sentences are transcribed before pausing.
-      const PAUSE_CMD = /^[\s.,!?]*(pause(\s+(vtp|recording|listening))?|stop\s+listening)[\s.,!?]*$/i;
       if (PAUSE_CMD.test(text)) {
-        this.log.appendLine('[VTP] Live chunk: "pause" detected  ” mic muted, draining queue then pausing.');
-        this.capture.kill(); //   immediate mic mute: stops FFmpeg + chunk poller
+        this.log.appendLine('[VTP] Live chunk: "pause" detected — mic muted, draining queue then pausing.');
+        this.capture.kill();
         this._chunkQueue = this._chunkQueue.then(() => {
-          this.interimTranscript = ''; // discard the word "pause"
+          this.interimTranscript = '';
           this.send({ type: 'transcriptResult', text: this.promptBuffer });
           this.isPaused = true;
           this.send({ type: 'paused' });
@@ -798,63 +1224,54 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         });
         return;
       }
-      //                                                                         
 
       this.interimTranscript = this.interimTranscript
         ? this.interimTranscript + ' ' + text
         : text;
 
-      // Show rolling live text  ” always prepend the accumulated buffer so the
-      // display doesn't reset when VAD stops and restarts mid-dictation.
       const displayText = this.promptBuffer
         ? this.promptBuffer + ' ' + this.interimTranscript
         : this.interimTranscript;
       this.send({ type: 'transcriptResult', text: displayText });
       this.log.appendLine(`[VTP] Live chunk: "${text}"`);
 
-      //    Send trigger: immediately mute mic, drain queue, inject             
-      // Check both the accumulated text AND the incoming chunk in isolation  ”
-      // a clean "send the prompt" chunk should fire even if prior chunks were garbled.
-      if (!this._sendTriggerFired && (this._hasSendTrigger(this.interimTranscript) || this._hasSendTrigger(text))) {
+      if (!this._sendTriggerFired && (hasSendTrigger(this.interimTranscript) || hasSendTrigger(text))) {
         this._sendTriggerFired = true;
         this._restartAfterSend = true;
         this.capture.kill();
-        this.log.appendLine('[VTP] Send trigger  ” mic muted, draining queue then injecting.');
+        this.log.appendLine('[VTP] Send trigger — mic muted, draining queue then injecting.');
         this.send({ type: 'vadAutoStop' });
         void this.stopRecording();
       }
 
-      //    Enhance trigger: same immediate-mute pattern as send trigger         â 
-      const ENHANCE_LIVE = /\b(enhance\s+(this|my|the)\s+prompt|enhance\s+prompt|improve\s+(this|my|the)\s+prompt|rewrite\s+(this|my|the)\s+prompt)\b/i;
       if (!this._enhanceTriggerFired && !this._sendTriggerFired && ENHANCE_LIVE.test(this.interimTranscript)) {
         this._enhanceTriggerFired = true;
         this.capture.kill();
-        this.log.appendLine('[VTP] Enhance trigger  ” mic muted, draining queue then enhancing.');
+        this.log.appendLine('[VTP] Enhance trigger — mic muted, draining queue then enhancing.');
         this.send({ type: 'vadAutoStop' });
         void this.stopRecording();
       }
 
-      //    Async background intent check  ” catches Gemini mishearings           â 
-      // Fire a non-blocking Gemini classify call on the ACCUMULATED interimTranscript
-      // whenever a short chunk arrives (â‰¤ 4 words = likely a command, not dictation).
-      // This is the fallback for cases where the regex missed because Gemini
-      // transcribed "send the prompt" as "script command" or similar phonetic variants.
       const chunkWordCount = text.split(/\s+/).filter(Boolean).length;
       const newChars = this.interimTranscript.length - this._lastAsyncClassifiedLength;
       const shouldClassify = !this._sendTriggerFired
         && !this._enhanceTriggerFired
-        && chunkWordCount <= 4           // short chunk = likely a command
-        && newChars >= 3                 // at least some new text to classify
+        && chunkWordCount <= 4
+        && newChars >= 3
         && this.interimTranscript.trim().length >= 3;
 
       if (shouldClassify) {
         this._lastAsyncClassifiedLength = this.interimTranscript.length;
-        // Fire and forget  ” must not block the chunk queue or throw
         void this.asyncCheckIntent(this.interimTranscript);
       }
     } catch (err) {
       this.log.appendLine(`[VTP] Chunk transcription error: ${this.formatError(err)}`);
     }
+  }
+
+  private extractTitle(id: string, rawLog: string): string {
+    const match = rawLog.substring(0, 1000).match(/(?:title|Title)[:\s]+([^\n]{1,80})/);
+    return match ? match[1].trim() : `Conversation ${id.slice(0, 8)}`;
   }
 
   private async transcribeAndProcess(buffer: Buffer, mimeType: string): Promise<void> {
@@ -863,46 +1280,32 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.send({ type: 'error', message: 'No API key set. Click KEY to add one.' });
       return;
     }
-
     this.log.appendLine('[VTP] Transcribing audio via Gemini...');
-
-    // Skip tiny clips  ” < 8 KB is < 0.5s, likely silence or accidental tap
     if (buffer.length < 8192) {
-      this.log.appendLine(`[VTP] Audio too short (${buffer.length} bytes)  ” skipping.`);
+      this.log.appendLine(`[VTP] Audio too short (${buffer.length} bytes) — skipping.`);
       return;
     }
-
     const base64 = buffer.toString('base64');
     try {
       const genai = new GoogleGenerativeAI(apiKey);
-      // Use systemInstruction to separate the instruction from the audio data.
-      // Inline text instructions can get echoed back into the transcription output.
       const model = genai.getGenerativeModel({
         model: 'gemini-2.5-flash',
         systemInstruction: 'You are a transcription service. Transcribe the audio exactly as spoken. Output ONLY the spoken words with no commentary, preamble, or system text. If there is no speech, output exactly: [SILENCE]',
       });
-
       const result = await this.withRetry(() =>
         model.generateContent([
           { inlineData: { mimeType, data: base64 } },
           'Transcribe the audio.',
         ]),
       );
-
       const raw = result.response.text().trim();
-      const text = this.sanitizeTranscription(raw);
+      const text = sanitizeTranscription(raw);
       this.log.appendLine(`[VTP] Transcription: "${text}"`);
-
-      // Silently skip silence or empty results  ” no error shown to user
       if (!text || text === '[SILENCE]') {
-        this.log.appendLine('[VTP] No speech detected  ” skipping.');
+        this.log.appendLine('[VTP] No speech detected — skipping.');
         return;
       }
-
       this.send({ type: 'transcriptResult', text });
-
-      // Drop pure wake-phrase noise from the first utterance after a voice-resume.
-      // e.g. user says "resume, I'm back, resume" while testing wake words.
       if (this.justResumed) {
         this.justResumed = false;
         const isWakeNoise = /^[\s.,!?]*((resume|continue|start|wake up|keep going|i'?m back|listen|go|activate|hey vtp)[\s.,!?]*)+$/i.test(text);
@@ -911,7 +1314,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
           return;
         }
       }
-
       await this.onFinalTranscript(text);
     } catch (err) {
       const msg = this.formatError(err);
@@ -920,100 +1322,48 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
   }
 
-  /**
-   * Strips sound annotations and leaked system prompt text from a Gemini
-   * transcription response.
-   *
-   * Gemini uses [brackets] ONLY for non-speech content:
-   *   [ chewing ]  [ RATTLE ]  [SOUND]  [SILENCE]  [ 0m0s ]  [NO SPEECH]
-   * Real spoken words are NEVER inside brackets, so we strip ALL [...] tokens.
-   */
-  private extractTitle(id: string, rawLog: string): string {
-    const match = rawLog.substring(0, 1000).match(/(?:title|Title)[:\s]+([^\n]{1,80})/);
-    return match ? match[1].trim() : `Conversation ${id.slice(0, 8)}`;
-  }
-  private sanitizeTranscription(raw: string): string {
-    let text = raw.trim();
-
-    //    Strip VTT / SRT subtitle format                                     
-    // Gemini sometimes returns its audio response in WebVTT or SRT format.
-    // Rows like "00:00:00.000 --> 00:00:02.500" must be removed.
-    // Also remove the "WEBVTT" header line if present.
-    text = text.replace(/^WEBVTT[\s\S]*?\n\n/m, '');       // WEBVTT header block
-    text = text.replace(/\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}/g, ''); // full timestamps
-    text = text.replace(/^\d{2}:\d{2}(:\d{2})?$/gm, '');   // short time tokens like "00:00" or "01:23:45"
-    text = text.replace(/^\d+$/gm, '');                    // SRT sequence numbers
-
-    //    Strip ALL [bracketed] non-speech annotations                         
-    text = text.replace(/\[[^\]]*\]/g, '');
-
-    //    Strip leaked system-prompt text                                     â 
-    const LEAK_MARKERS = [
-      'Transcribe this audio exactly as spoken',
-      'Output only the transcription',
-      'If no speech, output an empty string',
-      'You are a transcription service',
-      'Transcribe the audio.',
-      'transcribe the audio',
-      'You are a verbatim',
-    ];
-    for (const marker of LEAK_MARKERS) {
-      const idx = text.toLowerCase().indexOf(marker.toLowerCase());
-      if (idx > -1) {
-        text = text.substring(0, idx).trim().replace(/[.,!?]+$/, '').trim();
-      }
-    }
-
-    //    Collapse whitespace                                                 â 
-    text = text.replace(/\s{2,}/g, ' ').trim();
-    return text;
-  }
-
-  //   â  Intent processing                                                     
+  // ── onFinalTranscript ─────────────────────────────────────────────────────
 
   private async onFinalTranscript(segment: string): Promise<void> {
-    //    Enhancement review intercept  ” voice approve / reject / regenerate   
     if (this._awaitingEnhancementDecision) {
       const lc = segment.toLowerCase();
-      // Fuzzy approve: also catch "prove" (chunk-boundary fragment of "approve")
-      if (/\b(approve|accept|looks?\s+good|yes|use\s+it|perfect|great|keep\s+it|apply)\b|prove\s*$/i.test(lc)) {
+      if (ENHANCE_APPROVE.test(lc)) {
         this.log.appendLine('[VTP] Voice command: approve enhancement.');
         await this.handleEnhancementDecision('approve');
         return;
       }
-      if (/\b(reject|revert|no|go\s+back|undo|restore|cancel|discard|original)\b/i.test(lc)) {
+      if (ENHANCE_REJECT.test(lc)) {
         this.log.appendLine('[VTP] Voice command: reject enhancement.');
         await this.handleEnhancementDecision('reject');
         return;
       }
-      if (/\b(regenerate|try\s+again|redo|new\s+version|another|different|again)\b/i.test(lc)) {
+      if (ENHANCE_REGEN.test(lc)) {
         this.log.appendLine('[VTP] Voice command: regenerate enhancement.');
         await this.handleEnhancementDecision('regenerate');
         return;
       }
-      // Discard non-decision speech entirely  ” don't pollute the prompt buffer
-      // while the user is in the approve/reject review flow.
-      this.log.appendLine('[VTP] Enhancement pending  ” discarding non-decision speech.');
+      this.log.appendLine('[VTP] Enhancement pending — discarding non-decision speech.');
       this.send({ type: 'awaitingDecision' });
       return;
     }
 
-    //    Local voice commands (no Gemini needed)                             
-    // Pause is only triggered when the utterance IS the command  ” not when the
-    // word "pause" appears inside a longer dictation sentence.
-    const PAUSE_CMD = /^[\s.,!?]*(pause(\s+(recording|vtp|listening))?|stop\s+listening)[\s.,!?]*$/i;
     if (PAUSE_CMD.test(segment)) {
+      // Save whatever was said *before* "pause" into the buffer so it
+      // survives the pause/resume cycle.
+      const prePause = segment.replace(PAUSE_CMD, '').replace(/\s{2,}/g, ' ').trim();
+      if (prePause) {
+        this.promptBuffer += (this.promptBuffer ? ' ' : '') + prePause;
+        this.send({ type: 'transcriptResult', text: this.promptBuffer });
+        this.log.appendLine(`[VTP] Pre-pause content saved: "${prePause}"`);
+      }
       this.log.appendLine('[VTP] Voice command: pause.');
-      this._vadStop = false; // prevent stopRecording() from auto-restarting after this return
+      this._vadStop = false;
       this.pauseRecording();
       void this.checkForWakePhrase();
       return;
     }
 
-    // "Clear transcript", "clear the buffer", "clear that", "reset transcript", "start over"
-    // MUST be anchored (^...$) — otherwise "Clear that. Perfect. Okay. So for availabilities..."
-    // would wipe the buffer because "clear that" appears at the start of a long sentence.
-    if (/^[\s.,!?]*(clear(\s+(the\s+)?(transcript|buffer|prompt|that|this))?|reset(\s+the)?\s+(transcript|buffer|prompt)|start\s+over)[\s.,!?]*$/i.test(segment)) {
+    if (CLEAR_FINAL_CMD.test(segment)) {
       this.promptBuffer = '';
       this.interimTranscript = '';
       this.send({ type: 'transcriptResult', text: '' });
@@ -1021,80 +1371,57 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       return;
     }
 
-    // "Clean it up", "scrub that" — strip filler/noise without rewriting content
-    const CLEAN_TRIGGER = /\b(clean\s+it\s+up|clean\s+(this|that|the\s+prompt)\s+up|clean\s+up(\s+(the\s+)?(prompt|transcript|that|this))?|scrub\s+(that|this|it|the\s+prompt)|tidy\s+(this|that|it)\s+up)\b/i;
-    if (CLEAN_TRIGGER.test(segment)) {
+    if (CLEAN_CMD.test(segment)) {
       this.log.appendLine('[VTP] Voice command: clean transcript (Gemini mode).');
       void this.cleanAndApply();
       return;
     }
 
-    //    Fast-path: send trigger already confirmed by local regex             â 
     if (this._sendTriggerFired) {
-      const content = this.stripSendTrigger(segment);
-      if (content) {
-        this.promptBuffer += (this.promptBuffer ? ' ' : '') + content;
-      }
-      this.log.appendLine('[VTP] SEND (local trigger  ” Gemini bypassed).');
+      const content = stripSendTrigger(segment);
+      if (content) { this.promptBuffer += (this.promptBuffer ? ' ' : '') + content; }
+      this.log.appendLine('[VTP] SEND (local trigger — Gemini bypassed).');
       if (!this.promptBuffer.trim()) {
-        this.send({ type: 'error', message: 'Nothing to send  ” say something first.' });
+        this.send({ type: 'error', message: 'Nothing to send — say something first.' });
       } else {
         await this.injectRaw();
+        void this._postSendFlow();
       }
-      this.log.appendLine('[VTP] Restarting mic after send.');
-      void this.startRecording();
       return;
     }
 
-    //    Fast-path: enhance trigger already confirmed by local regex             
-    // _enhanceTriggerFired was set during live-chunk processing  ” skip Gemini
-    // intent classification entirely, go straight to elaboration.
     if (this._enhanceTriggerFired) {
       this._enhanceTriggerFired = false;
-      const content = this.stripEnhanceTrigger(segment);
-      if (content) {
-        this.promptBuffer += (this.promptBuffer ? ' ' : '') + content;
-      }
-      this.log.appendLine('[VTP] ENHANCE (local trigger  ” Gemini classification bypassed).');
+      const content = stripEnhanceTrigger(segment);
+      if (content) { this.promptBuffer += (this.promptBuffer ? ' ' : '') + content; }
+      this.log.appendLine('[VTP] ENHANCE (local trigger — Gemini classification bypassed).');
       await this.elaborateAndShow();
       return;
     }
 
-    //    Fast path: plain dictation (no action keywords)                     â 
-    // Only call Gemini when text contains an explicit VTP action trigger.
-    const SEND_TRIGGER = /\b(send it|send this|send the prompt|send this prompt|send my prompt|send now|submit this|submit the prompt)\b[.,!?\\s]*$/i;
-    const ACTION_TRIGGER = /\b(enhance (this|my|the) prompt|rewrite (this|my|the) prompt|improve (this|my|the) prompt|cancel( that)?|clear( that)?|open the terminal|run (the )?tests|hey vtp)\b/i;
-    const segmentCleaned = this._stripFiller(segment);
+    const segmentCleaned = stripFiller(segment);
 
-    //    Tail-scan fallback: send trigger in last ~120 chars                   
-    // If VAD fired after "send the prompt" and subsequent chunks appended more
-    // words, the $-anchored live-chunk regex will have missed it.  Scan the
-    // tail of the final assembled text as a recovery path.
-    if (!this._sendTriggerFired && this._hasSendTrigger(segment.slice(-120))) {
+    if (!this._sendTriggerFired && hasSendTrigger(segment.slice(-120))) {
       this._sendTriggerFired = true;
-      // Strip the trigger phrase from the end of the content
-      const tailCleaned = this.stripSendTrigger(segment);
-      if (tailCleaned) {
-        this.promptBuffer += (this.promptBuffer ? ' ' : '') + tailCleaned;
-      }
-      this.log.appendLine('[VTP] SEND (tail-scan trigger  ” chunk boundary recovery).');
+      const tailCleaned = stripSendTrigger(segment);
+      if (tailCleaned) { this.promptBuffer += (this.promptBuffer ? ' ' : '') + tailCleaned; }
+      this.log.appendLine('[VTP] SEND (tail-scan trigger — chunk boundary recovery).');
       if (!this.promptBuffer.trim()) {
-        this.send({ type: 'error', message: 'Nothing to send  ” say something first.' });
+        this.send({ type: 'error', message: 'Nothing to send — say something first.' });
       } else {
         await this.injectRaw();
+        void this._postSendFlow();
       }
-      void this.startRecording();
       return;
     }
 
     if (!SEND_TRIGGER.test(segment) && !SEND_TRIGGER.test(segmentCleaned) && !ACTION_TRIGGER.test(segment)) {
       this.promptBuffer += (this.promptBuffer ? ' ' : '') + segment;
       this.send({ type: 'transcriptResult', text: this.promptBuffer });
-      this.log.appendLine('[VTP] Plain dictation  ” added to buffer verbatim (no classification).');
+      this.log.appendLine('[VTP] Plain dictation — added to buffer verbatim (no classification).');
       return;
     }
 
-    //    Gemini classification for action-trigger utterances                   
     const apiKey = await this.secretManager.getApiKey();
     if (!apiKey) return;
 
@@ -1106,66 +1433,45 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       const result = await this.withRetry(() =>
         this.intentProcessor!.classify(segment, this.promptBuffer, context),
       );
-
-      this.log.appendLine(`[VTP] Intent: ${result.type}  ” "${result.content || result.commandIntent || ''}"`);
+      this.log.appendLine(`[VTP] Intent: ${result.type} — "${result.content || result.commandIntent || ''}"`);
       this.send({ type: 'intentResult', intent: result, buffer: this.promptBuffer });
 
       switch (result.type) {
         case 'PROMPT_CONTENT':
-          // Always use the raw segment verbatim  ” classifier must not rewrite the user's words.
-          // result.content is intentionally ignored here.
           this.promptBuffer += (this.promptBuffer ? ' ' : '') + segment;
           this.send({ type: 'transcriptResult', text: this.promptBuffer });
           break;
-
         case 'COMMAND': {
-          // COMMAND doesn't touch the prompt buffer
           const desc = await this.commandExecutor!.execute(result.commandIntent ?? segment);
           this.send({ type: 'commandFired', description: desc });
           break;
         }
-
         case 'ENHANCE':
-          // LLM may have extracted content said alongside the enhance trigger  ”
-          // e.g. "enhance this: add auth support"   content = "add auth support"
-          if (result.content) {
-            this.promptBuffer += (this.promptBuffer ? ' ' : '') + result.content;
-          }
+          if (result.content) { this.promptBuffer += (this.promptBuffer ? ' ' : '') + result.content; }
           await this.elaborateAndShow();
           break;
-
         case 'SEND': {
-          // LLM extracts content spoken before/alongside the send trigger  ”
-          // e.g. "build a login page, send it"   content = "build a login page"
           if (result.content) {
             this.promptBuffer += (this.promptBuffer ? ' ' : '') + result.content;
             this.log.appendLine(`[VTP] SEND with inline content: "${result.content}"`);
           }
           if (!this.promptBuffer.trim()) {
-            this.send({ type: 'error', message: 'Nothing to send  ” say something first.' });
+            this.send({ type: 'error', message: 'Nothing to send — say something first.' });
           } else {
             await this.injectRaw();
-            // If auto-triggered by voice send-command in continuous mode, restart immediately
-            if (this._restartAfterSend) {
-              this._restartAfterSend = false;
-              this.log.appendLine('[VTP] Continuous mode  ” restarting for next prompt.');
-              void this.startRecording();
-            }
+            void this._postSendFlow();
           }
           break;
         }
-
         case 'CANCEL':
           this.promptBuffer = '';
           this.interimTranscript = '';
           this.send({ type: 'transcriptResult', text: '' });
           break;
-
       }
     } catch (err) {
       const msg = this.formatError(err);
       this.log.appendLine(`[VTP] Intent error: ${msg}`);
-      // Save the segment as plain content so it's not lost on API errors (e.g. 503)
       if (segment.trim()) {
         this.promptBuffer += (this.promptBuffer ? ' ' : '') + segment.trim();
         this.send({ type: 'transcriptResult', text: this.promptBuffer });
@@ -1178,151 +1484,69 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private async onSend(prompt: string): Promise<void> {
-    this.log.appendLine(`[VTP] Manual send  ” injecting (${prompt.length} chars).`);
+    this.log.appendLine(`[VTP] Manual send — injecting (${prompt.length} chars).`);
     await this.chatInjector.inject(prompt);
     this.promptBuffer = '';
     this.send({ type: 'injected' });
   }
 
-  /** Voice said 'send it'  ” inject buffer raw, no elaboration */
   private async injectRaw(): Promise<void> {
     const prompt = this.promptBuffer.trim();
     this.log.appendLine(`[VTP] Injecting raw buffer (${prompt.length} chars).`);
     await this.chatInjector.inject(prompt);
     this.promptBuffer = '';
-    this.interimTranscript = ''; // prevent old transcript ghosting back into UI after send
+    this.interimTranscript = '';
     this.send({ type: 'injected' });
   }
 
-  private _stripFiller(text: string): string {
-    // Remove common filler words/greetings at the start and end of an utterance
-    // so that "hello send it hello"   "send it" and still triggers correctly.
-    return text
-      .replace(/^[\s,]*(hello|hi|hey|um|uh|okay|ok|alright|right|so|yeah|yes|well|now|please)[\s,]+/gi, '')
-      .replace(/[\s,]*(hello|hi|hey|um|uh|okay|ok|alright|right|yeah|yes)[\s,]*$/gi, '')
-      .trim();
-  }
-
-  /**
-   * Returns true if the text contains a voice "send" command.
-   * Used for real-time detection during live chunk transcription.
-   */
-  private _hasSendTrigger(text: string): boolean {
-    // Anchored to end-of-utterance: prevents mid-sentence matches like
-    // "we'll send the prompt from here" (has words after the trigger phrase).
-    const PATTERN = /\b(send it|send the prompt|send this prompt|send my prompt|send this|send that|submit this|go ahead and send|ok send|okay send|go send|please send|just send|send message|send now|submit now)\b[.,!?\s]*$/i;
-    // Also check after stripping filler words (handles "hello send it hello")
-    if (PATTERN.test(text) || PATTERN.test(this._stripFiller(text))) { return true; }
-    // Loose fallback: "send the [single-word]"  ” catches Gemini mishearings of
-    // "send the prompt" (e.g. "send the front", "send the chrome", etc.)
-    return /\bsend\s+the\s+\w+[.,!?\s]*$/i.test(this._stripFiller(text));
-  }
-
-  /**
-   * Fires a non-blocking Gemini intent classification on the accumulated
-   * interimTranscript. Called in the background (void, no await) so it never
-   * stalls the chunk queue. If classify() returns SEND or ENHANCE and the
-   * trigger hasn't fired yet via regex, fires it here  ” catching mishearings
-   * like "script command the prompt"   SEND that the regex can't catch.
-   */
   private async asyncCheckIntent(snapshot: string): Promise<void> {
     try {
       const apiKey = await this.secretManager.getApiKey();
       if (!apiKey) return;
       this.ensurePipeline(apiKey);
       const context = this.cachedContext ?? await this.contextCollector.collect();
-
       const result = await this.intentProcessor!.classify(snapshot, this.promptBuffer, context);
-
-      // Guard: triggers may have fired from the regex path while this was in-flight
       if (this._sendTriggerFired || this._enhanceTriggerFired) return;
-
       if (result.type === 'SEND') {
         this._sendTriggerFired = true;
         this._restartAfterSend = true;
         this.capture.kill();
-        this.log.appendLine('[VTP] Send trigger (async intent)  ” mic muted, draining queue then injecting.');
+        this.log.appendLine('[VTP] Send trigger (async intent) — mic muted, draining queue then injecting.');
         this.send({ type: 'vadAutoStop' });
         void this.stopRecording();
       } else if (result.type === 'ENHANCE') {
         this._enhanceTriggerFired = true;
         this.capture.kill();
-        this.log.appendLine('[VTP] Enhance trigger (async intent)  ” mic muted, draining queue then enhancing.');
+        this.log.appendLine('[VTP] Enhance trigger (async intent) — mic muted, draining queue then enhancing.');
         this.send({ type: 'vadAutoStop' });
         void this.stopRecording();
       }
     } catch {
-      // Silently swallow  ” this is a best-effort background check.
-      // Errors here must never surface to the user or break the pipeline.
+      // Silently swallow — best-effort background check.
     }
   }
 
-  /**
-   * Strips common "send" trigger phrases from a segment so the remaining
-   * content can be used as the prompt when buffer is empty.
-   * e.g. "This is a test. Send the prompt."   "This is a test."
-   */
-  private stripSendTrigger(segment: string): string {
-    const triggers = [
-      'send the prompt', 'send this prompt', 'send my prompt',
-      'send it', 'ok send', 'okay send',
-      'send message', 'go ahead and send', 'submit this',
-      'send this', 'send that', 'go send', 'please send', 'just send',
-    ];
-    let text = segment.trim();
-    for (const trigger of triggers) {
-      text = text.replace(new RegExp(`[.,!?]?\\s*${trigger}[.,!?]?$`, 'gi'), '').trim();
-    }
-    return text;
-  }
+  // ── Enhancement ───────────────────────────────────────────────────────────
 
-  private stripEnhanceTrigger(segment: string): string {
-    const triggers = [
-      'enhance this prompt', 'enhance my prompt', 'enhance the prompt', 'enhance prompt',
-      'improve this prompt', 'improve my prompt', 'improve the prompt',
-      'rewrite this prompt', 'rewrite my prompt', 'rewrite the prompt',
-    ];
-    let text = segment.trim();
-    for (const trigger of triggers) {
-      text = text.replace(new RegExp(`[.,!?]?\\s*${trigger}[.,!?]?$`, 'gi'), '').trim();
-    }
-    return text;
-  }
-
-
-  /** Voice said 'enhance prompt'  ” elaborate then surface in panel for review */
   private async elaborateAndShow(): Promise<void> {
     if (!this.promptBuffer.trim()) {
-      this.send({ type: 'error', message: 'Nothing to enhance  ” say something first.' });
+      this.send({ type: 'error', message: 'Nothing to enhance — say something first.' });
       return;
     }
-
     const apiKey = await this.secretManager.getApiKey();
     if (!apiKey) return;
-
     this.ensurePipeline(apiKey);
     this.send({ type: 'elaborating' });
-
-    // Save original BEFORE elaboration so reject/regenerate can restore it.
     this._originalBufferBeforeEnhance = this.promptBuffer;
-
     try {
-      const [context] = await Promise.all([
-        this.contextCollector.collect(),
-      ]);
+      const context = await this.contextCollector.collect();
       const conversation = this.getEffectiveConversation();
-
       const elaborated = await this.withRetry(() =>
         this.promptElaborator!.elaborate(this.promptBuffer, context, conversation),
       );
-
       this.promptBuffer = elaborated;
       this._awaitingEnhancementDecision = true;
       this.send({ type: 'elaborated', prompt: elaborated, original: this._originalBufferBeforeEnhance });
-
-      // Auto-restart mic so user can say "approve", "reject", or "try again" hands-free.
-      // The _awaitingEnhancementDecision flag ensures any speech goes to the decision handler,
-      // not the prompt buffer.
       this.log.appendLine('[VTP] Enhancement ready -- restarting mic for voice decision.');
       void this.startRecording();
     } catch (err) {
@@ -1332,225 +1556,26 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Handle approve / reject / regenerate from panel buttons or voice */
   private async handleEnhancementDecision(action: 'approve' | 'reject' | 'regenerate'): Promise<void> {
     this._awaitingEnhancementDecision = false;
-    // Discard any speech that arrived during the decision window so it doesn't
-    // bleed into the prompt buffer (e.g. the user saying "I approve" post-decision).
     this.interimTranscript = '';
-
     if (action === 'approve') {
-      // promptBuffer already has enhanced text  ” nothing to do on host side.
       this.log.appendLine('[VTP] Enhancement approved.');
       this.send({ type: 'enhancedApproved' });
-      // Restart mic so user can keep dictating or say "send it" immediately.
       void this.startRecording();
-
     } else if (action === 'reject') {
-      // Restore the original buffer.
       this.promptBuffer = this._originalBufferBeforeEnhance;
       this.log.appendLine('[VTP] Enhancement rejected -- original restored.');
       this.send({ type: 'enhancedRejected', original: this._originalBufferBeforeEnhance });
-      // Restart mic so user can continue dictating after restore.
       void this.startRecording();
-
     } else if (action === 'regenerate') {
-      // Restore original, then re-run elaboration from scratch.
       this.promptBuffer = this._originalBufferBeforeEnhance;
-      this.log.appendLine('[VTP] Enhancement regenerate  ” re-elaborating original.');
+      this.log.appendLine('[VTP] Enhancement regenerate — re-elaborating original.');
       await this.elaborateAndShow();
     }
   }
 
-  //   â  API key handling                                                     â 
-
-  private async sendApiKeyStatus(): Promise<void> {
-    const key = await this.secretManager.getApiKey();
-    this.send({ type: 'apiKeyStatus', hasKey: !!key });
-    this.log.appendLine(`[VTP] API key status: ${key ? 'set' : 'not set'}`);
-  }
-
-  private async sendDeepgramKeyStatus(): Promise<void> {
-    const key = await this.secretManager.getSecret('vtp.deepgramApiKey');
-    const engine = vscode.workspace.getConfiguration('vtp').get<string>('transcriptionEngine', 'gemini');
-    this.send({ type: 'deepgramKeyStatus', hasKey: !!key, active: engine === 'deepgram' });
-    this.log.appendLine(`[VTP] Deepgram status: ${key ? 'key set' : 'no key'}, engine=${engine}`);
-  }
-
-  /**
-   * Full opt-in onboarding flow for the optional Deepgram transcription engine.
-   *
-   * Deepgram is a 3rd-party service  ” we always show a disclosure first.
-   * The key is stored ONLY in VS Code SecretStorage on this machine.
-   * Nothing is ever sent anywhere except api.deepgram.com when recording.
-   */
-  private async handleDeepgramKey(): Promise<void> {
-    const existingKey = await this.secretManager.getSecret('vtp.deepgramApiKey');
-    const engine = vscode.workspace.getConfiguration('vtp').get<string>('transcriptionEngine', 'gemini');
-
-    if (existingKey && engine === 'deepgram') {
-      // Already active — offer privacy settings, disable, or remove
-      const action = await vscode.window.showInformationMessage(
-        'Deepgram real-time transcription is active ✔. Your API key is stored locally in VS Code SecretStorage.',
-        'Privacy Settings',
-        'Disable Deepgram',
-        'Remove Key',
-        'Cancel',
-      );
-
-      if (action === 'Privacy Settings') {
-        await this.handleDeepgramPrivacySettings();
-      } else if (action === 'Disable Deepgram') {
-        await vscode.workspace.getConfiguration('vtp').update('transcriptionEngine', 'gemini', vscode.ConfigurationTarget.Global);
-        this.log.appendLine('[VTP] Deepgram disabled — switched back to Gemini transcription.');
-      } else if (action === 'Remove Key') {
-        await this.secretManager.deleteSecret('vtp.deepgramApiKey');
-        await vscode.workspace.getConfiguration('vtp').update('transcriptionEngine', 'gemini', vscode.ConfigurationTarget.Global);
-        this.log.appendLine('[VTP] Deepgram API key removed.');
-      }
-      await this.sendDeepgramKeyStatus();
-      return;
-    }
-
-    //    First-time disclosure                                                 
-    const disclosure = await vscode.window.showInformationMessage(
-      [
-        'âš¡ Deepgram is an optional 3rd-party service that reduces transcription latency from ~5s to ~300ms.',
-        'Free API key is all you need.',
-        '| Data usage: Deepgram transcribes your audio and by default uses it to improve their models (opt-out available via mip_opt_out=true).',
-        'They do NOT sell your data. Logs retained 90 days.',
-        'See deepgram.com/privacy for full details.',
-      ].join(' '),
-      'Get Free Key',
-      'Enter My Key',
-      'Cancel',
-    );
-
-    if (disclosure === 'Get Free Key') {
-      await vscode.env.openExternal(vscode.Uri.parse('https://console.deepgram.com'));
-      // Re-open the dialog after they return so they can paste their key
-      const action2 = await vscode.window.showInformationMessage(
-        'Once you have your Deepgram API key, click Enter Key to activate real-time transcription.',
-        'Enter Key',
-        'Cancel',
-      );
-      if (action2 !== 'Enter Key') { return; }
-    } else if (disclosure !== 'Enter My Key') {
-      return;
-    }
-
-    //    Key input                                                             
-    const key = await vscode.window.showInputBox({
-      prompt: 'Paste your Deepgram API key',
-      placeHolder: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-      password: true,
-      ignoreFocusOut: true,
-      validateInput: (v) => v.trim().length < 10 ? 'Key looks too short  ” check and try again' : undefined,
-    });
-
-    if (!key?.trim()) { return; }
-
-    await this.secretManager.storeSecret('vtp.deepgramApiKey', key.trim());
-    await vscode.workspace.getConfiguration('vtp').update('transcriptionEngine', 'deepgram', vscode.ConfigurationTarget.Global);
-    await this.sendDeepgramKeyStatus();
-
-    this.log.appendLine('[VTP] Deepgram API key saved. Real-time transcription enabled.');
-    vscode.window.showInformationMessage('Deepgram activated âœ“  ” next recording will use real-time transcription.');
-  }
-
-  /**
-   * Walk the user through Deepgram privacy preferences — MIP opt-out,
-   * transcript redaction, and profanity filtering.
-   * Changes are saved to VS Code global config and take effect on the
-   * next recording session.
-   */
-  private async handleDeepgramPrivacySettings(): Promise<void> {
-    const cfg = vscode.workspace.getConfiguration('vtp');
-
-    // Read current values
-    const mipOn       = cfg.get<boolean>('deepgramMipOptOut', false);
-    const profanityOn = cfg.get<boolean>('deepgramProfanityFilter', false);
-    const redactList  = cfg.get<string[]>('deepgramRedact', []);
-
-    // Build one unified item list — pre-pick anything that's currently enabled
-    const items = [
-      { label: 'Opt out of model training',    description: 'Prevents Deepgram from using your audio to improve their models (mip_opt_out)',       key: 'mip',     picked: mipOn },
-      { label: 'Profanity filter',             description: 'Replaces recognised profanity with [censored] in the transcript',                      key: 'profanity', picked: profanityOn },
-      { label: 'Redact PCI data',              description: 'Credit card numbers, CVVs, expiry dates',                                              key: 'pci',     picked: redactList.includes('pci') },
-      { label: 'Redact PII data',              description: 'Names, addresses, phone numbers, emails',                                              key: 'pii',     picked: redactList.includes('pii') },
-      { label: 'Redact numbers',               description: 'All numeric sequences in the transcript',                                              key: 'numbers', picked: redactList.includes('numbers') },
-      { label: 'Redact SSN',                   description: 'Social Security Numbers',                                                              key: 'ssn',     picked: redactList.includes('ssn') },
-    ];
-
-    const picks = await vscode.window.showQuickPick(items, {
-      title: 'Deepgram Privacy Settings',
-      placeHolder: 'Space to toggle options, Enter to save. All changes take effect on the next recording.',
-      canPickMany: true,
-      ignoreFocusOut: true,
-    });
-
-    // User pressed Escape — no changes
-    if (picks === undefined) { return; }
-
-    // Derive new values from selection
-    const pickedKeys = new Set((picks as any[]).map((p) => (p as any).key));
-    const newMip       = pickedKeys.has('mip');
-    const newProfanity = pickedKeys.has('profanity');
-    const newRedact: string[] = [];
-    for (const r of ['pci', 'pii', 'numbers', 'ssn'] as const) {
-      if (pickedKeys.has(r)) { newRedact.push(r); }
-    }
-
-    // Persist
-    await cfg.update('deepgramMipOptOut', newMip, vscode.ConfigurationTarget.Global);
-    await cfg.update('deepgramProfanityFilter', newProfanity, vscode.ConfigurationTarget.Global);
-    await cfg.update('deepgramRedact', newRedact, vscode.ConfigurationTarget.Global);
-
-    // Summary
-    const redactSummary = newRedact.length > 0 ? newRedact.join(', ') : 'none';
-    this.log.appendLine(
-      `[VTP] Deepgram privacy: mip_opt_out=${newMip}, redact=[${redactSummary}], profanity_filter=${newProfanity}`,
-    );
-    vscode.window.showInformationMessage(
-      `Deepgram privacy saved — MIP opt-out: ${newMip ? 'on' : 'off'} | Redact: ${redactSummary} | Profanity filter: ${newProfanity ? 'on' : 'off'}`,
-    );
-  }
-
-
-  private async handleOpenSettings(): Promise<void> {
-    const existing = await this.secretManager.getApiKey();
-    if (existing) {
-      const action = await vscode.window.showInformationMessage(
-        'VTP: Gemini API key is active âœ“', 'Update Key',
-      );
-      if (action === 'Update Key') {
-        const newKey = await this.secretManager.promptForApiKey();
-        if (newKey) { await this.sendApiKeyStatus(); }
-      }
-    } else {
-      const key = await this.secretManager.promptForApiKey();
-      if (key) { await this.sendApiKeyStatus(); }
-    }
-  }
-
-  private async showApiKeyInfo(): Promise<void> {
-    const action = await vscode.window.showInformationMessage(
-      'VTP uses Gemini for intent classification and prompt elaboration. Get a free key at Google AI Studio.',
-      'Open AI Studio',
-      'Enter My Key Now',
-    );
-    if (action === 'Open AI Studio') {
-      vscode.env.openExternal(vscode.Uri.parse('https://aistudio.google.com/apikey'));
-    } else if (action === 'Enter My Key Now') {
-      await this.handleOpenSettings();
-    }
-  }
-
-  private handleMicDenied(): void {
-    // FFmpeg is already the primary mic source  ” webview denial is expected, nothing to do.
-  }
-
-  //   â  Helpers                                                               
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
   private async withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
     let attempt = 0;
@@ -1562,19 +1587,18 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         const is429 = msg.includes('429') || msg.includes('Too Many Requests');
         const is503 = msg.includes('503') || msg.includes('Service Unavailable') || msg.includes('high demand');
         const isRetryable = (is429 || is503) && attempt < maxRetries;
-
         if (isRetryable) {
           attempt++;
           let wait: number;
           if (is429) {
-            const m = msg.match(/retryDelay['":\s]+(\d+)s/);
+            const m = msg.match(/retryDelay['"\s:]+(\d+)s/);
             wait = m ? parseInt(m[1], 10) : 30;
-            this.log.appendLine(`[VTP] Rate limited  ” retrying in ${wait}s (${attempt}/${maxRetries})`);
-            this.send({ type: 'error', message: `Rate limited  ” retrying in ${wait}s ¦` });
+            this.log.appendLine(`[VTP] Rate limited — retrying in ${wait}s (${attempt}/${maxRetries})`);
+            this.send({ type: 'error', message: `Rate limited — retrying in ${wait}s…` });
           } else {
-            wait = attempt * 5; // 5s, 10s, 15s  ” short ramp for transient overload
-            this.log.appendLine(`[VTP] Gemini overloaded (503)  ” retrying in ${wait}s (${attempt}/${maxRetries})`);
-            this.send({ type: 'error', message: `Gemini busy  ” retrying in ${wait}s ¦` });
+            wait = attempt * 5;
+            this.log.appendLine(`[VTP] Gemini overloaded (503) — retrying in ${wait}s (${attempt}/${maxRetries})`);
+            this.send({ type: 'error', message: `Gemini busy — retrying in ${wait}s…` });
           }
           await new Promise((r) => setTimeout(r, wait * 1000));
         } else {
@@ -1587,110 +1611,95 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private formatError(err: unknown): string {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('429') || msg.includes('Too Many Requests')) {
-      return 'Gemini rate limit reached  ” wait a minute and try again.';
+      return 'Gemini rate limit reached — wait a minute and try again.';
     }
     if (msg.includes('503') || msg.includes('Service Unavailable') || msg.includes('high demand')) {
-      return 'Gemini is experiencing high demand  ” text saved to buffer, will retry next time.';
+      return 'Gemini is experiencing high demand — text saved to buffer, will retry next time.';
     }
     return msg;
   }
 
-  /**
-   * Auto-detects the primary context (most recently modified = current chat)
-   * and notifies the panel. Does NOT overwrite if already loaded.
-   */
   private refreshContext(): void {
+    // Don't run while recording or paused — context is stable during a session
+    // and the log entries confuse debugging.
+    if (this.capture.isRecording() || this.isPaused) return;
     Promise.all([
       this.contextCollector.collect(),
       this.conversationMatcher.findBestMatch(),
     ]).then(([context, conversation]) => {
+      // Only log + send if something meaningful changed
+      const newTitle = conversation?.title ?? 'none';
+      const prevTitle = this.cachedConversation?.title ?? 'none';
+      const prevWorkspace = this.cachedContext?.workspaceName ?? '';
+      const changed = newTitle !== prevTitle || context.workspaceName !== prevWorkspace;
+
       this.cachedContext = context;
       this.cachedConversation = conversation;
-      const title = conversation?.title ?? 'none';
-      const shortTitle = title.length > 60 ? title.slice(0, 57) + '...' : title;
-      const extrasCount = this._extraConversations.length;
-      this.log.appendLine(`[VTP] Context ready  ” workspace="${context.workspaceName}", conv="${shortTitle}", extras=${extrasCount}`);
-      this.send({
-        type: 'contextUpdate',
-        workspaceName: context.workspaceName,
-        conversationTitle: shortTitle,
-        pinned: extrasCount > 0,   // show pin badge when extras are active
-      });
+
+      if (changed) {
+        const shortTitle = newTitle.length > 60 ? newTitle.slice(0, 57) + '...' : newTitle;
+        const extrasCount = this._extraConversations.length;
+        this.log.appendLine(`[VTP] Context ready — workspace="${context.workspaceName}", conv="${shortTitle}", extras=${extrasCount}`);
+        this.send({
+          type: 'contextUpdate',
+          workspaceName: context.workspaceName,
+          conversationTitle: shortTitle,
+          pinned: extrasCount > 0,
+        });
+      }
     }).catch((e) => this.log.appendLine(`[VTP] Context error: ${e}`));
   }
 
-  /**
-   * Returns the effective conversation context: primary + any extras the user added.
-   * The extras are appended as read-only supplementary messages.
-   */
   private getEffectiveConversation(): MatchedConversation | null {
     const primary = this.cachedConversation;
     if (!this._extraConversations.length) return primary;
-
-    // Merge primary messages + extras messages (extras appended, not replacing)
     const primaryMsgs = primary?.messages ?? [];
     const extraMsgs = this._extraConversations.flatMap((c) => c.messages);
     const depth = vscode.workspace.getConfiguration('vtp').get<number>('contextDepth', 20);
-
     return {
       id: (primary?.id ?? 'primary') + '+' + this._extraConversations.map((c) => c.id).join('+'),
       title: primary?.title ?? 'none',
-      messages: [...primaryMsgs, ...extraMsgs].slice(-depth * 2), // give room for extras
+      messages: [...primaryMsgs, ...extraMsgs].slice(-depth * 2),
       score: primary?.score ?? 0,
     };
   }
 
-  /**
-   * Opens a VS Code QuickPick showing all past conversations.
-   * - Primary (auto) is shown at the top as read-only info.
-   * - User can toggle extras on/off by clicking (checked = added, unchecked = removed).
-   * - Extras are read-only supplementary context; they don't replace the primary.
-   */
   private async openConversationPicker(): Promise<void> {
     const all: ScoredConversation[] = await this.conversationMatcher.findAllMatches();
-
     if (!all.length) {
       vscode.window.showWarningMessage('VTP: No Antigravity conversation logs found in ~/.gemini/antigravity/brain.');
       return;
     }
-
     const primaryId = this.cachedConversation?.id;
-
     const fmt = (c: ScoredConversation): string => {
       const d = new Date(c.lastModified);
       const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      return `${c.title.slice(0, 60)}${c.title.length > 60 ? ' ¦' : ''}   ${date}`;
+      return `${c.title}   ${date}`;
     };
-
     type Item = vscode.QuickPickItem & { conv?: ScoredConversation };
-
     const items: Item[] = [
-      // Header  ” current primary (read-only)
       {
         label: `$(eye)  Current (auto): ${this.cachedConversation?.title?.slice(0, 50) ?? 'none'}`,
-        description: 'Primary context  ” auto-detected, always active',
+        description: 'Primary context — auto-detected, always active',
         kind: vscode.QuickPickItemKind.Default,
       },
-      { label: 'Extra context  ” toggle to add or remove', kind: vscode.QuickPickItemKind.Separator },
-      // All other conversations (skip primary)
+      { label: 'Extra context — toggle to add or remove', kind: vscode.QuickPickItemKind.Separator },
       ...all
         .filter((c) => c.id !== primaryId)
         .map((c): Item => ({
           label: fmt(c),
-          description: c.preview ? `"${c.preview.slice(0, 60)}"` : '',
+          description: c.workspacePath || undefined,
           picked: this._extraConversations.some((e) => e.id === c.id),
           conv: c,
         })),
     ];
 
-    // Multi-select QuickPick so user can add/remove multiple extras at once
     const qp = vscode.window.createQuickPick<Item>();
-    qp.title = 'VTP  ” Extra Conversation Context';
+    qp.title = 'VTP — Extra Conversation Context';
     qp.placeholder = 'Check conversations to add as supplementary context (read-only)';
     qp.canSelectMany = true;
     qp.matchOnDescription = true;
     qp.items = items;
-    // Pre-check already-added extras
     qp.selectedItems = items.filter((i) => i.conv && this._extraConversations.some((e) => e.id === i.conv!.id));
 
     const result = await new Promise<Item[] | undefined>((resolve) => {
@@ -1699,16 +1708,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       qp.show();
     });
 
-    if (result === undefined) return; // cancelled
-
-    // Update extras  ” only conversations (skip the header item which has no conv)
+    if (result === undefined) return;
     const newExtras = result.filter((i) => !!i.conv).map((i) => i.conv!);
     this._extraConversations = newExtras;
-
     const extrasCount = newExtras.length;
     const primaryTitle = this.cachedConversation?.title ?? 'none';
     const shortTitle = primaryTitle.length > 60 ? primaryTitle.slice(0, 57) + '...' : primaryTitle;
-
     this.log.appendLine(`[VTP] Extra context updated: ${extrasCount} conversation(s) added.`);
     this.send({
       type: 'contextUpdate',
@@ -1748,8 +1753,26 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     return Array.from({ length: 32 }, () => c[Math.floor(Math.random() * c.length)]).join('');
   }
 
+  /**
+   * Public toggle used by the global hotkey and `vtp.toggleRecording` command.
+   * Can be called from any app — the sidebar is focused by extension.ts first.
+   */
+  public toggleRecording(): void {
+    if (this.capture.isRecording()) {
+      this.log.appendLine('[VTP] toggleRecording: stopping.');
+      void this.stopRecording();
+    } else if (this.isPaused) {
+      this.log.appendLine('[VTP] toggleRecording: resuming from pause.');
+      void this.resumeRecording();
+    } else {
+      this.log.appendLine('[VTP] toggleRecording: starting.');
+      void this.startRecording();
+    }
+  }
+
   dispose(): void {
     this.capture.kill();
+    this._voiceActivationMonitor?.stop();
     this.commandRegistry.dispose();
   }
 }

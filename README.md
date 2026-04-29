@@ -1,12 +1,11 @@
-# STP — Speech to Prompt
+# STP — Hands-Free Speech to Prompt
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-NVS%20Tech-0A66C2?style=flat&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/nvstech/)
 [![Open VSX](https://img.shields.io/open-vsx/v/nizzynas/vtp-voice-prompt?style=flat&label=Open%20VSX&color=C160EF)](https://open-vsx.org/extension/nizzynas/vtp-voice-prompt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-gray?style=flat)](LICENSE)
 
-> **Talk to Antigravity. Completely hands-free.**
+> **Prompt Antigravity. Completely hands-free.**
 
-STP is an Antigravity extension that lets you create prompts by voice and fire them straight into your [Antigravity](https://antigravity.dev) chat. No typing, no copy-paste, no need to press send, you say it out loud. You talk, it listens, you can ask Gemini to clean it up, you can enhance it or you can send it straight away — all without touching the keyboard or mouse.
+STP is an Antigravity extension that lets you dictate, enhance, and send prompts into [Antigravity](https://antigravity.dev) by saying **hey antigravity** (default) — start to finish, entirely by voice. No typing, no clicking, no pressing send.  
 
 > After the voice pipeline was working, I used the STP extension to build the rest of the extension — so there are some rough edges, but it works, it's useful, and it's being actively improved.
 
@@ -22,49 +21,60 @@ STP is an Antigravity extension that lets you create prompts by voice and fire t
 
 ---
 
+## Completely Hands-Free
+
+The full loop — start, dictate, send, repeat — happens entirely by voice. No mouse. No keyboard.
+
+Say your wake phrase and STP starts listening. The default is **"hey antigravity"**. Change it anytime in Settings.
+
+### Two modes
+
+| Mode | What happens after a prompt is sent |
+|---|---|
+| **Voice Activated** *(default)* | Mic idles. Say your wake phrase to start the next prompt. |
+| **Continuous** | Mic auto-restarts immediately. Just keep talking. |
+
+Switch anytime from the Settings menu in the panel.
+
+---
+
 ## How It Works in Practice
 
 ### Basic flow — dictate and send
 
-> *You speak:*
-> "Build a staff availability page. Each staff member should be able to set their weekly schedule using a calendar-style UI. Use the existing card styling from the dashboard. **Send the prompt.**"
+> *"**Hey antigravity.** Build a staff availability page. Each staff member sets their weekly schedule with a calendar UI. Use the existing dashboard card styling. **Send the prompt.**"*
 
-STP picks up `send the prompt`, injects your prompt directly into Antigravity chat, no need to press send, and restarts the mic. Done.
+STP hears `send the prompt`, injects it into Antigravity, and goes back to listening.
 
 ---
 
 ### Enhance flow — let Gemini polish it first
 
-> *You speak:*
-> "I need a modal that pops up when a staff member tries to set their availability but hasn't selected their service category yet. It should block them and prompt them to save their categories first. **Enhance this prompt.**"
+> *"**Hey antigravity.** I need a modal that blocks staff from setting availability until they've saved their service category. **Enhance this prompt.**"*
 
-Gemini rewrites it into a precise, production-ready spec. You see the enhanced version inline and say:
+Gemini rewrites it into a precise spec. Review it inline:
 
-> *"Approve."* → fires into Antigravity.
-> *"Reject."* → restores your original.
+> *"Approve."* → fires into Antigravity.  
+> *"Reject."* → restores your original.  
 > *"Try again."* → Gemini takes another pass.
 
 ---
 
 ### Clean flow — strip noise before sending
 
-Say something awkward mid-dictation? Someone walked in? No problem:
+> *"**Hey antigravity.** Add rate limiting to the API — hold on, sorry — add a 429 response with a Retry-After header. **Clean it up. Send the prompt.**"*
 
-> *You speak:*
-> "Add rate limiting to the API — hold on, hey, yeah I'll be right there — okay where was I — add a 429 response with a Retry-After header. **Clean it up. Send the prompt.**"
-
-`Clean it up` runs Gemini with a strict strip-only pass: fillers, interruptions, and off-topic noise are removed. Your actual intent is preserved. Then `send the prompt` fires it.
+`Clean it up` strips fillers and interruptions without touching your intent. Then `send the prompt` fires it.
 
 ---
 
 ### Pause and resume — mid-session
 
-> *You speak:*
-> "Build a login page with Google OAuth and — **pause.**"
+> *"**Hey antigravity.** Build a login page with Google OAuth and — **pause.**"*
 
-Mic mutes immediately. Buffer is preserved. Later:
+Mic mutes. Buffer preserved. Later:
 
-> *"Resume."* → mic wakes back up exactly where you left off.
+> *"Resume."* → mic wakes exactly where you left off.
 
 ---
 
@@ -86,21 +96,51 @@ Mic mutes immediately. Buffer is preserved. Later:
 
 ## Voice Command Reference
 
-Commands work **mid-sentence** — you don't have to say them alone. Say them naturally as part of your dictation.
+### Starting a session
+
+| Say | What happens |
+|---|---|
+| `hey antigravity` *(default)* | Starts listening — no click needed |
+| Any custom wake phrase | Configurable in Settings |
+
+### While dictating
+
+Most commands work **mid-sentence** — say them naturally as part of your dictation.
 
 | Say | What happens |
 |---|---|
 | *(just talk)* | Appends to your prompt buffer |
-| `send it` / `send the prompt` | Injects directly into Antigravity — no click, no paste |
-| `enhance this prompt` | Rewrites with Gemini. Approve / Reject / Try Again inline |
-| `clean it up` / `scrub that` | Strips filler words and noise — never expands or rewrites |
-| `approve` / `reject` / `try again` | Voice-control the enhancement review |
-| `pause` / `mute` / `stop listening` | Mutes mic; buffer preserved |
-| `resume` / `continue` / `I'm back` | Wakes from pause |
-| `clear transcript` / `clear that` | Discards the current buffer — must be said alone |
-| `open the terminal` / `run tests` | IDE commands — no prompt involved |
+| `send it` / `send the prompt` | Injects directly into Antigravity |
+| `enhance this prompt` | Gemini rewrites it. Review inline with voice |
+| `clean it up` / `scrub that` | Strips filler and noise — never expands or rewrites |
+| `approve` / `reject` / `try again` | Controls the enhancement review |
 
-> **Note:** Commands are ~10x faster in Deepgram mode (~300ms) vs Gemini chunked mode (~5s).
+### Pause and resume
+
+| Say | What happens |
+|---|---|
+| `pause` / `mute` / `stop listening` | Mutes mic immediately; buffer preserved |
+| `resume` / `I'm back` | Wakes back up exactly where you left off |
+| `pause and pull up [url]` | Pauses and opens the URL in one command |
+
+### Side commands
+
+Say these to trigger actions without touching your prompt buffer.
+
+| Say | What happens |
+|---|---|
+| `pull up [url or topic]` | Opens URL or fires into Antigravity chat |
+| `search for [query]` / `look up [query]` | Searches via Antigravity MCP |
+| `navigate to [url]` / `browse to [url]` | Opens the URL directly |
+
+### Clear
+
+| Say | What happens |
+|---|---|
+| `clear transcript` / `clear that` | Discards the current buffer — must be said alone |
+| `start over` | Resets the buffer |
+
+> Commands are ~10x faster in Deepgram mode (~300ms) vs Gemini chunked mode (~5s).
 
 ---
 
@@ -128,7 +168,7 @@ Click the microphone button and start dictating. In Gemini mode, audio processes
 
 ### 5. (Recommended) Enable Deepgram for real-time transcription
 
-By default STP uses Gemini for transcription (offline, no extra keys, ~4-7s latency). Enable Deepgram for ~300ms latency and instant voice command response — it's free and takes 2 minutes.
+By default STP uses Gemini for transcription (~4–7s per chunk). Enable Deepgram for ~300ms latency and instant voice command response — it's free and takes 2 minutes.
 
 Click **LIVE** in the STP panel header and follow the onboarding.
 
@@ -192,7 +232,7 @@ Extras are **read-only** — they inform the elaboration but cannot be modified 
 | `vtp.vadMode` | `false` | Always-on VAD — auto-pauses after silence, restarts automatically |
 | `vtp.contextDepth` | `20` | Recent conversation messages passed as context to Gemini |
 | `vtp.elaborationModel` | `gemini-2.5-flash` | Gemini model used for prompt enhancement |
-| `vtp.transcriptionEngine` | `gemini` | `gemini` (default, offline-capable) or `deepgram` (real-time, requires key) |
+| `vtp.transcriptionEngine` | `gemini` | `gemini` (default, uses Gemini key) or `deepgram` (real-time, requires separate Deepgram key) |
 
 ---
 

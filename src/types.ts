@@ -59,7 +59,17 @@ export type PanelMessage =
   /** Enhancement review decision: approve keeps enhanced, reject restores original, regenerate re-elaborates */
   | { type: 'enhancementDecision'; action: 'approve' | 'reject' | 'regenerate' }
   /** User clicked the DG button to manage their optional Deepgram API key */
-  | { type: 'manageDeepgramKey' };
+  | { type: 'manageDeepgramKey' }
+  /** User clicked the ⌨ KEY button — open VS Code keyboard shortcut editor for VTP */
+  | { type: 'openKeybindings' }
+  /** Onboarding completed — persist engine choice, keys, and flow preferences */
+  | { type: 'onboardingComplete'; engine: 'gemini' | 'deepgram'; geminiKey?: string; deepgramKey?: string; activationMode: 'wake' | 'manual'; postSendMode: 'continuous' | 'pause'; wakePhrase: string }
+  /** Settings panel saved new preferences */
+  | { type: 'applySettings'; activationMode: 'wake' | 'manual'; postSendMode: 'continuous' | 'pause'; wakePhrase: string }
+  /** User switched transcription engine from the engine picker dropdown */
+  | { type: 'setEngine'; engine: 'gemini' | 'deepgram' }
+  /** Voice activation toggle changed from the panel (legacy compat, kept for keybind path) */
+  | { type: 'setVoiceActivation'; enabled: boolean; wakePhrase: string };
 
 
 
@@ -78,7 +88,7 @@ export type ExtensionMessage =
   | { type: 'transcriptResult'; text: string }
   | { type: 'apiKeyStatus'; hasKey: boolean }
   /** Deepgram key status (optional — only sent when Deepgram is configured) */
-  | { type: 'deepgramKeyStatus'; hasKey: boolean; active: boolean }
+  | { type: 'deepgramKeyStatus'; hasKey: boolean; active: boolean; engine: 'gemini' | 'deepgram' }
 
   | { type: 'recordingStarted' }
   | { type: 'recordingStopped' }
@@ -87,5 +97,8 @@ export type ExtensionMessage =
   | { type: 'resumed' }      // manual resume confirmed
   | { type: 'autoPaused' }   // auto-pause triggered by extended silence
   | { type: 'wakeReady' }    // FFmpeg initialized, wake monitor is listening
-  | { type: 'awaitingDecision' }; // non-decision speech discarded during enhance review
-
+  | { type: 'awaitingDecision' }   // non-decision speech discarded during enhance review
+  /** Tell the webview to render the first-run onboarding wizard */
+  | { type: 'showOnboarding' }
+  /** Notify webview of current flow settings (sent on ready + after applySettings) */
+  | { type: 'settingsStatus'; activationMode: 'wake' | 'manual'; postSendMode: 'continuous' | 'pause'; wakePhrase: string };

@@ -256,7 +256,13 @@ export class DeepgramTranscriber {
     // Deepgram response schema: { type, channel, is_final, speech_final }
     if (msg.type !== 'Results') return;
     const transcript: string = msg?.channel?.alternatives?.[0]?.transcript ?? '';
-    if (!transcript.trim()) return;
+    if (!transcript.trim()) {
+      // [DBG] surface empty results so we can tell DG IS receiving audio
+      if (this.onFinal && msg.is_final !== undefined) {
+        // No-op: empty result is normal (silence). Surfaced via PCM log instead.
+      }
+      return;
+    }
 
     if (msg.is_final) {
       this.onFinal?.(transcript);

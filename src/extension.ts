@@ -12,7 +12,8 @@ export function activate(context: vscode.ExtensionContext): void {
   logger.appendLine('[VTP] Extension activating...');
 
   const secretManager = new SecretManager(context.secrets);
-  panel = new VTPPanel(context.extensionUri, secretManager, logger);
+  // Pass globalState so VTPPanel can persist the onboarding-complete flag
+  panel = new VTPPanel(context.extensionUri, secretManager, logger, context.globalState);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(VTPPanel.viewId, panel, {
@@ -39,6 +40,15 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('vtp.stopRecording', () => {
       logger.appendLine('[VTP] Stop recording command invoked.');
+    }),
+  );
+
+  // ── vtp.toggleRecording — bound to Ctrl+Shift+Space via contributes.keybindings ──
+  // Users can remap via: Keyboard Shortcuts editor → search "VTP: Toggle Recording"
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vtp.toggleRecording', async () => {
+      await vscode.commands.executeCommand('workbench.view.extension.vtp-sidebar');
+      panel?.toggleRecording();
     }),
   );
 

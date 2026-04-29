@@ -1,8 +1,8 @@
 {
     "name": "vtp-voice-prompt",
-    "displayName": "STP — Speech to Prompt",
+    "displayName": "STP — Hands-Free Speech to Prompt",
     "description": "Speech-to-prompt for Antigravity. Dictate, enhance with Gemini, and fire prompts into Antigravity — entirely by voice.",
-    "version": "0.1.24",
+    "version": "0.1.25",
     "icon": "media/icon.png",
     "publisher": "nizzynas",
     "license": "MIT",
@@ -66,15 +66,51 @@
             {
                 "command": "vtp.setApiKey",
                 "title": "VTP: Set Gemini API Key"
+            },
+            {
+                "command": "vtp.toggleRecording",
+                "title": "VTP: Toggle Recording"
+            }
+        ],
+        "keybindings": [
+            {
+                "command": "vtp.toggleRecording",
+                "key": "ctrl+shift+space",
+                "mac": "cmd+shift+space"
             }
         ],
         "configuration": {
-            "title": "STP — Speech to Prompt",
+            "title": "STP — Hands-Free Speech to Prompt",
             "properties": {
                 "vtp.vadMode": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Enable always-on voice activity detection mode"
+                    "description": "(Legacy) Enable always-on voice activity detection mode. Use vtp.conversationMode instead."
+                },
+                "vtp.activationMode": {
+                    "type": "string",
+                    "enum": ["wake", "manual"],
+                    "enumDescriptions": [
+                        "Say your wake phrase to start recording (e.g. \"hey antigravity\").",
+                        "Press the button or keybind to start recording (Push to Talk)."
+                    ],
+                    "default": "wake",
+                    "description": "How a new recording session is started."
+                },
+                "vtp.postSendMode": {
+                    "type": "string",
+                    "enum": ["continuous", "pause"],
+                    "enumDescriptions": [
+                        "Mic auto-restarts after each send so you can keep dictating immediately.",
+                        "Mic goes idle after each send. Use your activation method to start the next prompt."
+                    ],
+                    "default": "pause",
+                    "description": "What happens after a prompt is sent."
+                },
+                "vtp.wakePhrase": {
+                    "type": "string",
+                    "default": "hey antigravity",
+                    "description": "The phrase to say to start recording (when activationMode is 'wake')."
                 },
                 "vtp.contextDepth": {
                     "type": "number",
@@ -122,6 +158,16 @@
                     "type": "boolean",
                     "default": false,
                     "description": "When enabled, Deepgram replaces recognised profanity in the returned transcript with [censored]. Managed via the Deepgram Privacy Settings menu."
+                },
+                "vtp.voiceActivation.enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, VTP listens in the background for the wake phrase and starts recording automatically when it is detected."
+                },
+                "vtp.voiceActivation.wakePhrase": {
+                    "type": "string",
+                    "default": "hey antigravity",
+                    "description": "The wake phrase VTP listens for when voice activation is enabled. Shorter phrases (e.g. 'hey vtp') are easier to trigger reliably."
                 }
             }
         }
@@ -129,19 +175,19 @@
     "scripts": {
         "build": "webpack --mode production",
         "watch": "webpack --watch --mode development",
-        "package": "vsce package --no-dependencies --out vtp-voice-prompt-0.1.0.vsix",
-        "compile": "webpack --mode production \u0026\u0026 tsc --noEmit",
+        "package": "vsce package --out vtp-voice-prompt-0.1.0.vsix",
+        "compile": "webpack --mode production && tsc --noEmit",
         "typecheck": "tsc --noEmit",
-        "release": "npm run build \u0026\u0026 vsce package --no-dependencies --out vtp-voice-prompt.vsix \u0026\u0026 vsce publish --packagePath vtp-voice-prompt.vsix \u0026\u0026 ovsx publish vtp-voice-prompt.vsix -p %OVSX_TOKEN%"
+        "release": "npm run build && vsce package --out vtp-voice-prompt.vsix && vsce publish --packagePath vtp-voice-prompt.vsix && ovsx publish vtp-voice-prompt.vsix -p %OVSX_TOKEN%"
     },
     "devDependencies": {
         "@types/node": "^20.0.0",
         "@types/vscode": "^1.85.0",
+        "@vscode/vsce": "^2.24.0",
         "ts-loader": "^9.5.1",
         "typescript": "^5.3.0",
         "webpack": "^5.90.0",
-        "webpack-cli": "^5.1.4",
-        "@vscode/vsce": "^2.24.0"
+        "webpack-cli": "^5.1.4"
     },
     "dependencies": {
         "@google/generative-ai": "^0.21.0"

@@ -1,7 +1,12 @@
-.vscode/**
-node_modules/**
-out/**
-src/**
-.gitignore
-webpack.config.js
+# Source & dev files (not needed at runtime — webpack bundles everything)
+src/
+out/
+.vscode-test/
 tsconfig.json
+webpack.config.js
+.gitignore
+.env
+*.vsix
+
+# All node_modules are webpack-bundled into dist/extension.js
+node_modules/**

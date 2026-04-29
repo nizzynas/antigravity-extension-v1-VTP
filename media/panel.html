@@ -8,7 +8,7 @@
   />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="{{styleUri}}" />
-  <title>STP — Speech to Prompt</title>
+  <title>STP — Hands-Free Speech to Prompt</title>
 </head>
 <body>
 
@@ -22,11 +22,45 @@
       </div>
       <div class="vtp-header-actions">
         <button id="btn-info" class="btn-icon" title="How to get your API key">ℹ</button>
-        <button id="btn-apikey" class="btn-icon btn-apikey-status" title="Gemini API Key">● KEY</button>
-        <button id="btn-vad" class="btn-icon vad-toggle" title="Toggle always-on listening">
-          <span class="vad-dot"></span> VAD
-        </button>
-        <button id="btn-deepgram" class="btn-icon btn-deepgram" title="Enable real-time Deepgram transcription (optional, ~300ms latency)">⚡ LIVE</button>
+
+        <!-- Engine picker -->
+        <div class="engine-picker" id="engine-picker">
+          <button id="btn-engine" class="btn-icon btn-engine" title="Switch transcription engine">
+            <span id="engine-label">⚡ Deepgram</span>
+          </button>
+          <div id="engine-menu" class="engine-menu hidden">
+            <button class="engine-option" data-engine="gemini">
+              <span class="eo-icon">✦</span>
+              <span class="eo-body">
+                <span class="eo-title">Gemini</span>
+                <span class="eo-desc">Google AI · ~4–5s chunks</span>
+              </span>
+              <span class="eo-check" id="eo-check-gemini">✓</span>
+            </button>
+            <button class="engine-option" data-engine="deepgram">
+              <span class="eo-icon">⚡</span>
+              <span class="eo-body">
+                <span class="eo-title">Deepgram</span>
+                <span class="eo-desc">Real-time · ~100ms latency</span>
+              </span>
+              <span class="eo-check" id="eo-check-deepgram">✓</span>
+            </button>
+            <div class="engine-menu-sep"></div>
+            <button class="engine-option engine-option-manage" id="eo-manage-keys">
+              <span class="eo-icon">🔑</span>
+              <span class="eo-body">
+                <span class="eo-title">Manage API Keys</span>
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Hidden compat stubs (JS still references these for key status) -->
+        <button id="btn-apikey"   class="btn-icon btn-apikey-status"  style="display:none">● KEY</button>
+        <button id="btn-deepgram" class="btn-icon btn-deepgram"        style="display:none">⚡ LIVE</button>
+
+        <button id="btn-mode"   class="btn-icon btn-mode"   title="Conversation flow settings">⚙ Settings</button>
+        <button id="btn-hotkey" class="btn-icon btn-hotkey" title="Remap shortcut">⌨ KEY</button>
       </div>
     </header>
 
@@ -77,24 +111,27 @@
       </div>
     </div>
 
-    <div class="card glossary-card">
-      <div class="card-label">🗂 Voice Commands</div>
+    <details class="glossary-card">
+      <summary class="glossary-summary">
+        <span class="glossary-summary-label">Voice Commands</span>
+        <span class="glossary-chevron">&#x25be;</span>
+      </summary>
       <table class="glossary-table">
         <thead>
           <tr><th>Say</th><th>What happens</th></tr>
         </thead>
         <tbody>
           <tr>
-            <td><code>[just talk]</code></td>
-            <td>Appends to prompt. Stop and record again to continue.</td>
+            <td><span class="vc-wake">hey antigravity</span></td>
+            <td>Starts recording &amp; appends to your prompt buffer.</td>
           </tr>
           <tr>
             <td><code>send it</code> / <code>send the prompt</code></td>
-            <td>Sends directly into Antigravity — no paste needed.</td>
+            <td>Sends directly into Antigravity — no click needed.</td>
           </tr>
           <tr>
             <td><code>enhance this prompt</code></td>
-            <td>Rewrites &amp; expands prompt with Gemini. Approve / Reject / Try Again inline.</td>
+            <td>Gemini rewrites it. Approve / Reject / Try Again inline.</td>
           </tr>
           <tr>
             <td><code>approve</code> / <code>reject</code> / <code>try again</code></td>
@@ -102,48 +139,96 @@
           </tr>
           <tr>
             <td><code>clean it up</code> / <code>scrub that</code></td>
-            <td>Strips filler words &amp; off-topic noise from the buffer — no rewriting, just cleanup. Auto-applies.</td>
+            <td>Strips filler words — never rewrites.</td>
           </tr>
           <tr>
             <td><code>cancel</code> / <code>clear that</code></td>
-            <td>Discards the entire transcript buffer.</td>
-          </tr>
-          <tr>
-            <td><code>open the terminal</code> / <code>run tests</code></td>
-            <td>IDE command — runs without touching the prompt.</td>
+            <td>Discards the transcript buffer.</td>
           </tr>
           <tr class="glossary-divider">
-            <td colspan="2"><strong>⏸ Pause &amp; Resume</strong></td>
+            <td colspan="2"><strong>Pause &amp; Resume</strong></td>
           </tr>
           <tr>
-            <td><code>pause</code> / <code>mute</code> / <code>stop listening</code></td>
-            <td>Immediately mutes mic. Buffer is preserved.</td>
+            <td><code>pause</code> / <code>mute</code></td>
+            <td>Mutes mic immediately. Buffer preserved.</td>
           </tr>
           <tr>
-            <td><em>Auto-pause</em></td>
-            <td>Mic stays on but enters monitor mode after ~9s of silence.</td>
-          </tr>
-          <tr>
-            <td><code>resume</code> / <code>continue</code> / <code>I'm back</code></td>
-            <td>Voice wake — reactivates recording from pause mode.</td>
-          </tr>
-          <tr>
-            <td><em>⏸ button</em></td>
-            <td>Manual pause. Mic stays on. Click ▶ or say <code>resume</code> to continue.</td>
+            <td><code>resume</code> / <code>I'm back</code></td>
+            <td>Wakes back up exactly where you left off.</td>
           </tr>
         </tbody>
       </table>
       <div class="glossary-tip">
-        💡 Combine in one breath: <em>"Build a login page with OAuth. Send the prompt."</em><br>
-        ⚡ Commands trigger faster in Deepgram mode (~300ms vs ~3s chunks).
+        <div class="vc-tip-label">Try it in one breath:</div>
+        <div class="vc-examples">
+          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Add a dark mode toggle to this component. Send the prompt.</div>
+          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Explain what this function does. Send it.</div>
+          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Write tests for this file. Send the prompt.</div>
+        </div>
       </div>
-    </div>
+    </details>
 
     <!-- Commands log (hidden until a command fires) -->
     <div id="command-section" class="card hidden">
       <div class="card-label">⚡ Commands Fired</div>
       <div id="command-log" class="command-log"></div>
     </div>
+    <!-- Settings panel (slide-in, hidden by default) -->
+    <div id="settings-panel" class="settings-panel hidden">
+      <div class="settings-inner">
+      <div class="settings-header">
+        <span class="settings-title">⚙ Flow Settings</span>
+        <button id="settings-close" class="settings-close">✕</button>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">How to start recording</div>
+        <div class="settings-choices">
+          <label class="settings-choice" id="sc-wake">
+            <input type="radio" name="activationMode" value="wake" />
+            <div class="sc-body">
+              <div class="sc-title">🎙 Wake Phrase</div>
+              <div class="sc-desc">Say your phrase to start — hands-free</div>
+            </div>
+          </label>
+          <label class="settings-choice" id="sc-manual">
+            <input type="radio" name="activationMode" value="manual" />
+            <div class="sc-body">
+              <div class="sc-title">👆 Push to Talk</div>
+              <div class="sc-desc">Click button or use keybind to start</div>
+            </div>
+          </label>
+        </div>
+        <div id="wake-phrase-row" class="wake-phrase-row">
+          <label class="settings-sublabel">Wake phrase</label>
+          <input id="settings-wake-input" class="settings-input" type="text" maxlength="40" placeholder="hey antigravity" />
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">After sending a prompt</div>
+        <div class="settings-choices">
+          <label class="settings-choice" id="sc-continuous">
+            <input type="radio" name="postSendMode" value="continuous" />
+            <div class="sc-body">
+              <div class="sc-title">🔄 Continuous</div>
+              <div class="sc-desc">Mic auto-restarts — keep talking</div>
+            </div>
+          </label>
+          <label class="settings-choice" id="sc-pause">
+            <input type="radio" name="postSendMode" value="pause" />
+            <div class="sc-body">
+              <div class="sc-title">⏸ Pause &amp; Resume</div>
+              <div class="sc-desc">Goes idle — use wake phrase or button again</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <button id="settings-save" class="settings-save">Save Settings</button>
+      </div><!-- /settings-inner -->
+    </div><!-- /settings-panel -->
+
 
     <!-- Spinner (hidden until elaboration starts) -->
     <div id="spinner" class="spinner hidden">
@@ -151,7 +236,86 @@
       <span>Enhancing with Gemini...</span>
     </div>
 
-  </div>
+
+    <!-- ═══ Onboarding wizard (first-run only) ═══════════════════════════════ -->
+    <div id="onboarding-overlay" class="onboarding-overlay hidden">
+
+      <!-- Screen 1: Welcome + Engine choice -->
+      <div class="ob-screen" id="ob-screen-1">
+        <div class="ob-icon">🎙</div>
+        <h1 class="ob-title">Welcome to STP</h1>
+        <p class="ob-subtitle">Speech to Prompt for Antigravity — let's get you set up in 3 steps.</p>
+        <p class="ob-step-label">Step 1 of 3 — Choose your transcription engine</p>
+        <div class="ob-choices">
+          <button class="ob-choice" id="ob-engine-deepgram">
+            <span class="ob-choice-icon">⚡</span>
+            <div class="ob-choice-body">
+              <div class="ob-choice-label">Deepgram <span class="ob-badge">Fastest</span></div>
+              <div class="ob-choice-desc">~300ms real-time streaming · Best for natural speech</div>
+            </div>
+          </button>
+          <button class="ob-choice" id="ob-engine-gemini">
+            <span class="ob-choice-icon">🔵</span>
+            <div class="ob-choice-body">
+              <div class="ob-choice-label">Gemini + FFmpeg</div>
+              <div class="ob-choice-desc">~3–5s per chunk · Uses your existing Gemini key</div>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      <!-- Screen 2: API Key entry -->
+      <div class="ob-screen hidden" id="ob-screen-2">
+        <div class="ob-back-row">
+          <button class="ob-back" id="ob-back-2">← Back</button>
+          <span class="ob-step-label">Step 2 of 3</span>
+        </div>
+        <h2 class="ob-title" id="ob-key-title">Enter your API key</h2>
+        <p class="ob-subtitle" id="ob-key-desc">Your key is stored securely in VS Code SecretStorage and never leaves this machine.</p>
+        <a class="ob-link" id="ob-key-link" href="#" target="_blank">Get a free key →</a>
+        <input class="ob-input" type="password" id="ob-key-input" placeholder="Paste your API key here" autocomplete="off" />
+        <p class="ob-hint" id="ob-key-hint"></p>
+        <div class="ob-screen-actions">
+          <button class="ob-skip" id="ob-skip-key">Skip for now</button>
+          <button class="ob-next" id="ob-next-2">Continue →</button>
+        </div>
+      </div>
+
+      <!-- Screen 3: Flow mode -->
+      <div class="ob-screen hidden" id="ob-screen-3">
+        <div class="ob-back-row">
+          <button class="ob-back" id="ob-back-3">← Back</button>
+          <span class="ob-step-label">Step 3 of 3</span>
+        </div>
+        <h2 class="ob-title">How should prompts flow?</h2>
+        <p class="ob-subtitle">You can change this anytime via <strong>⚙ Settings</strong> in the header.</p>
+        <div class="ob-choices">
+          <button class="ob-choice" id="ob-mode-continuous">
+            <span class="ob-choice-icon">🔄</span>
+            <div class="ob-choice-body">
+              <div class="ob-choice-label">Continuous</div>
+              <div class="ob-choice-desc">Mic auto-resumes after each send. Keep talking without any wake phrase.</div>
+            </div>
+          </button>
+          <button class="ob-choice" id="ob-mode-voice">
+            <span class="ob-choice-icon">🎙</span>
+            <div class="ob-choice-body">
+              <div class="ob-choice-label">Voice Activated</div>
+              <div class="ob-choice-desc">Mic goes idle after each send. Say your wake phrase to start the next prompt. Say "resume" or "I'm back" to resume from pause.</div>
+            </div>
+          </button>
+        </div>
+        <div id="ob-wake-row" class="ob-wake-row hidden">
+          <label class="ob-wake-label">Your wake phrase</label>
+          <input class="ob-input" id="ob-wake-input" type="text" value="hey antigravity" maxlength="40" />
+          <p class="ob-hint">Try something short — "hey VTP", "hey Jarvis", "go time"</p>
+        </div>
+        <button class="ob-finish" id="ob-finish">Finish Setup ✓</button>
+      </div>
+
+    </div><!-- /onboarding-overlay -->
+
+  </div><!-- /vtp-root -->
 
   <script nonce="{{cspNonce}}" src="{{scriptUri}}"></script>
 </body>

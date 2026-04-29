@@ -13,6 +13,7 @@ module.exports = {
   },
   externals: {
     vscode: 'commonjs vscode',
+    'node-global-key-listener': 'commonjs node-global-key-listener',
   },
   resolve: {
     extensions: ['.ts', '.js'],
