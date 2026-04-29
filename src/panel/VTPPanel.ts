@@ -17,7 +17,7 @@ import { PromptElaborator } from '../pipeline/PromptElaborator';
 import { ChatInjector } from '../pipeline/ChatInjector';
 import { CommandRegistry } from '../commands/CommandRegistry';
 import { AudioCapture } from '../audio/AudioCapture';
-import { DeepgramTranscriber } from '../audio/DeepgramTranscriber';
+import { DeepgramTranscriber, DeepgramOptions } from '../audio/DeepgramTranscriber';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export class VTPPanel implements vscode.WebviewViewProvider {
@@ -213,7 +213,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
       if (useDeepgram) {
         this.log.appendLine('[VTP] Starting FFmpeg audio capture (Deepgram streaming mode)...');
-        const dg = new DeepgramTranscriber(dgKey!);
+        const dgOpts: DeepgramOptions = {
+          mipOptOut:       vscode.workspace.getConfiguration('vtp').get<boolean>('deepgramMipOptOut', false),
+          profanityFilter: vscode.workspace.getConfiguration('vtp').get<boolean>('deepgramProfanityFilter', false),
+          redact:          vscode.workspace.getConfiguration('vtp').get<string[]>('deepgramRedact', []) as DeepgramOptions['redact'],
+        };
+        const dg = new DeepgramTranscriber(dgKey!, dgOpts);
         this._deepgramTranscriber = dg;
 
         dg.onReady = () => { this.log.appendLine('[VTP] Deepgram WebSocket connected.'); };
@@ -1384,16 +1389,20 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     const engine = vscode.workspace.getConfiguration('vtp').get<string>('transcriptionEngine', 'gemini');
 
     if (existingKey && engine === 'deepgram') {
-      // Already active  ” offer to disable or remove key
+      // Already active — offer privacy settings, disable, or remove
       const action = await vscode.window.showInformationMessage(
-        'Deepgram real-time transcription is active âœ“. Your API key is stored locally in VS Code SecretStorage.',
+        'Deepgram real-time transcription is active ✔. Your API key is stored locally in VS Code SecretStorage.',
+        'Privacy Settings',
         'Disable Deepgram',
         'Remove Key',
         'Cancel',
       );
-      if (action === 'Disable Deepgram') {
+
+      if (action === 'Privacy Settings') {
+        await this.handleDeepgramPrivacySettings();
+      } else if (action === 'Disable Deepgram') {
         await vscode.workspace.getConfiguration('vtp').update('transcriptionEngine', 'gemini', vscode.ConfigurationTarget.Global);
-        this.log.appendLine('[VTP] Deepgram disabled  ” switched back to Gemini transcription.');
+        this.log.appendLine('[VTP] Deepgram disabled — switched back to Gemini transcription.');
       } else if (action === 'Remove Key') {
         await this.secretManager.deleteSecret('vtp.deepgramApiKey');
         await vscode.workspace.getConfiguration('vtp').update('transcriptionEngine', 'gemini', vscode.ConfigurationTarget.Global);
@@ -1448,6 +1457,65 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.log.appendLine('[VTP] Deepgram API key saved. Real-time transcription enabled.');
     vscode.window.showInformationMessage('Deepgram activated âœ“  ” next recording will use real-time transcription.');
   }
+
+  /**
+   * Walk the user through Deepgram privacy preferences — MIP opt-out,
+   * transcript redaction, and profanity filtering.
+   * Changes are saved to VS Code global config and take effect on the
+   * next recording session.
+   */
+  private async handleDeepgramPrivacySettings(): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration('vtp');
+
+    // Read current values
+    const mipOn       = cfg.get<boolean>('deepgramMipOptOut', false);
+    const profanityOn = cfg.get<boolean>('deepgramProfanityFilter', false);
+    const redactList  = cfg.get<string[]>('deepgramRedact', []);
+
+    // Build one unified item list — pre-pick anything that's currently enabled
+    const items = [
+      { label: 'Opt out of model training',    description: 'Prevents Deepgram from using your audio to improve their models (mip_opt_out)',       key: 'mip',     picked: mipOn },
+      { label: 'Profanity filter',             description: 'Replaces recognised profanity with [censored] in the transcript',                      key: 'profanity', picked: profanityOn },
+      { label: 'Redact PCI data',              description: 'Credit card numbers, CVVs, expiry dates',                                              key: 'pci',     picked: redactList.includes('pci') },
+      { label: 'Redact PII data',              description: 'Names, addresses, phone numbers, emails',                                              key: 'pii',     picked: redactList.includes('pii') },
+      { label: 'Redact numbers',               description: 'All numeric sequences in the transcript',                                              key: 'numbers', picked: redactList.includes('numbers') },
+      { label: 'Redact SSN',                   description: 'Social Security Numbers',                                                              key: 'ssn',     picked: redactList.includes('ssn') },
+    ];
+
+    const picks = await vscode.window.showQuickPick(items, {
+      title: 'Deepgram Privacy Settings',
+      placeHolder: 'Space to toggle options, Enter to save. All changes take effect on the next recording.',
+      canPickMany: true,
+      ignoreFocusOut: true,
+    });
+
+    // User pressed Escape — no changes
+    if (picks === undefined) { return; }
+
+    // Derive new values from selection
+    const pickedKeys = new Set((picks as any[]).map((p) => (p as any).key));
+    const newMip       = pickedKeys.has('mip');
+    const newProfanity = pickedKeys.has('profanity');
+    const newRedact: string[] = [];
+    for (const r of ['pci', 'pii', 'numbers', 'ssn'] as const) {
+      if (pickedKeys.has(r)) { newRedact.push(r); }
+    }
+
+    // Persist
+    await cfg.update('deepgramMipOptOut', newMip, vscode.ConfigurationTarget.Global);
+    await cfg.update('deepgramProfanityFilter', newProfanity, vscode.ConfigurationTarget.Global);
+    await cfg.update('deepgramRedact', newRedact, vscode.ConfigurationTarget.Global);
+
+    // Summary
+    const redactSummary = newRedact.length > 0 ? newRedact.join(', ') : 'none';
+    this.log.appendLine(
+      `[VTP] Deepgram privacy: mip_opt_out=${newMip}, redact=[${redactSummary}], profanity_filter=${newProfanity}`,
+    );
+    vscode.window.showInformationMessage(
+      `Deepgram privacy saved — MIP opt-out: ${newMip ? 'on' : 'off'} | Redact: ${redactSummary} | Profanity filter: ${newProfanity ? 'on' : 'off'}`,
+    );
+  }
+
 
   private async handleOpenSettings(): Promise<void> {
     const existing = await this.secretManager.getApiKey();

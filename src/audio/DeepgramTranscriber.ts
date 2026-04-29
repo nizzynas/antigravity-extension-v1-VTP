@@ -11,25 +11,49 @@
 
 import * as https from 'https';
 
+// ─── Privacy / behaviour options ─────────────────────────────────────────────
+export interface DeepgramOptions {
+  /** Opt out of Deepgram Model Improvement Program (mip_opt_out=true). */
+  mipOptOut?: boolean;
+  /**
+   * Redact sensitive information from the transcript.
+   * Accepted values: 'pci' | 'pii' | 'numbers' | 'ssn'
+   * Multiple values are allowed and each gets its own query param.
+   */
+  redact?: Array<'pci' | 'pii' | 'numbers' | 'ssn'>;
+  /** Replace recognised profanity with [censored]. */
+  profanityFilter?: boolean;
+}
+
 // ─── Deepgram WebSocket URL ───────────────────────────────────────────────────
 const DG_HOST = 'api.deepgram.com';
-const DG_PATH = [
-  '/v1/listen',
-  '?encoding=linear16',
-  '&sample_rate=16000',
-  '&channels=1',
-  '&model=nova-2',
-  '&language=en',
-  '&interim_results=true',
-  '&endpointing=300',      // 300ms silence = end of utterance
-  '&smart_format=true',    // punctuation + capitalization
-  '&no_delay=true',        // lowest latency mode
-].join('');
+
+function buildDgPath(opts: DeepgramOptions = {}): string {
+  const parts = [
+    '/v1/listen',
+    '?encoding=linear16',
+    '&sample_rate=16000',
+    '&channels=1',
+    '&model=nova-2',
+    '&language=en',
+    '&interim_results=true',
+    '&endpointing=300',      // 300ms silence = end of utterance
+    '&smart_format=true',    // punctuation + capitalization
+    '&no_delay=true',        // lowest latency mode
+  ];
+  if (opts.mipOptOut)        { parts.push('&mip_opt_out=true'); }
+  if (opts.profanityFilter)  { parts.push('&profanity_filter=true'); }
+  for (const r of (opts.redact ?? [])) {
+    parts.push(`&redact=${encodeURIComponent(r)}`);
+  }
+  return parts.join('');
+}
 
 export class DeepgramTranscriber {
   private ws: import('net').Socket | null = null;
   private _connected = false;
   private _buffer: Buffer[] = [];
+  private readonly _dgPath: string;
 
   /** Called with partial (interim) transcript as user speaks — for live display */
   onInterim: ((text: string) => void) | null = null;
@@ -40,7 +64,9 @@ export class DeepgramTranscriber {
   /** Called when connection is open and ready to receive audio */
   onReady:   (() => void) | null = null;
 
-  constructor(private readonly apiKey: string) {}
+  constructor(private readonly apiKey: string, opts: DeepgramOptions = {}) {
+    this._dgPath = buildDgPath(opts);
+  }
 
   /**
    * Opens a WebSocket to Deepgram.
@@ -52,7 +78,7 @@ export class DeepgramTranscriber {
     // ── Build the HTTP Upgrade request ────────────────────────────────────────
     const key = Buffer.from(`vtp-${Date.now()}`).toString('base64');
     const requestHeaders = [
-      `GET ${DG_PATH} HTTP/1.1`,
+      `GET ${this._dgPath} HTTP/1.1`,
       `Host: ${DG_HOST}`,
       `Authorization: Token ${this.apiKey}`,
       `Upgrade: websocket`,

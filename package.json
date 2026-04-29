@@ -2,7 +2,7 @@
     "name":  "vtp-voice-prompt",
     "displayName":  "STP — Speech to Prompt",
     "description":  "Speech-to-prompt for Antigravity. Dictate, enhance with Gemini, and fire prompts into Antigravity — entirely by voice.",
-    "version":  "0.1.22",
+    "version":  "0.1.23",
     "icon":  "media/icon.png",
     "publisher":  "nizzynas",
     "license":  "MIT",
@@ -98,7 +98,33 @@
                                                                                                                       ],
                                                                                                  "default":  "gemini",
                                                                                                  "description":  "Transcription engine. Deepgram is a 3rd-party optional service that significantly reduces transcription latency. Your Deepgram API key is stored only in VS Code SecretStorage on this machine."
-                                                                                             }
+                                                                                             },
+                                                                 "vtp.deepgramMipOptOut":  {
+                                                                                               "type":  "boolean",
+                                                                                               "default":  false,
+                                                                                               "description":  "Opt out of the Deepgram Model Improvement Program. When true, Deepgram will not use your audio to train their models (mip_opt_out=true). The free-tier 50% MIP discount is removed when opted out. Managed via the Deepgram Privacy Settings menu."
+                                                                                           },
+                                                                 "vtp.deepgramRedact":  {
+                                                                                            "type":  "array",
+                                                                                            "items":  {
+                                                                                                          "type":  "string",
+                                                                                                          "enum":  [
+                                                                                                                       "pci",
+                                                                                                                       "pii",
+                                                                                                                       "numbers",
+                                                                                                                       "ssn"
+                                                                                                                   ]
+                                                                                                      },
+                                                                                            "default":  [
+
+                                                                                                        ],
+                                                                                            "description":  "Sensitive data types to redact from Deepgram transcripts. Redacted values are replaced with [redacted]. Options: pci (payment data), pii (names/addresses), numbers (all numerics), ssn (Social Security Numbers). Managed via the Deepgram Privacy Settings menu."
+                                                                                        },
+                                                                 "vtp.deepgramProfanityFilter":  {
+                                                                                                     "type":  "boolean",
+                                                                                                     "default":  false,
+                                                                                                     "description":  "When enabled, Deepgram replaces recognised profanity in the returned transcript with [censored]. Managed via the Deepgram Privacy Settings menu."
+                                                                                                 }
                                                              }
                                           }
                     },
