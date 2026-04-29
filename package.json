@@ -1,8 +1,8 @@
 {
     "name": "vtp-voice-prompt",
-    "displayName": "VTP — Voice to Prompt",
-    "description": "Voice-to-prompt for Antigravity. Dictate, enhance with Gemini, and fire prompts into Antigravity — entirely by voice, inside VS Code.",
-    "version": "0.1.17",
+    "displayName": "STP — Speech to Prompt",
+    "description": "Speech-to-prompt for Antigravity. Dictate, enhance with Gemini, and fire prompts into Antigravity — entirely by voice, inside VS Code.",
+    "version": "0.1.18",
     "icon": "media/icon.png",
     "publisher": "nizzynas",
     "license": "MIT",
@@ -22,14 +22,17 @@
         "Machine Learning"
     ],
     "keywords": [
-        "voice",
         "speech",
+        "voice",
         "ai",
         "gemini",
         "prompt",
         "dictation",
+        "speech-to-prompt",
+        "voice-to-prompt",
         "voice-to-code",
         "antigravity",
+        "stp",
         "vtp"
     ],
     "activationEvents": [
@@ -66,7 +69,7 @@
             }
         ],
         "configuration": {
-            "title": "VTP — Voice to Prompt",
+            "title": "STP — Speech to Prompt",
             "properties": {
                 "vtp.vadMode": {
                     "type": "boolean",

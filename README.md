@@ -1,10 +1,10 @@
-# VTP — Voice to Prompt
+# STP — Speech to Prompt
 
-> **Voice-driven AI coding. Dictate. Enhance. Send. Completely hands-free.**
+> **Speech-driven AI coding. Dictate. Enhance. Send. Completely hands-free.**
 
-VTP turns your voice into a full AI coding workflow. Click once to start recording, then speak your idea — Gemini shapes it into a production-ready prompt and fires it straight into your prompts window in [Antigravity](https://antigravity.dev). Dictate, enhance, send: all by voice, no keyboard required once you're rolling.
+STP turns your voice into a full AI coding workflow. Click once to start recording, then speak your idea — Gemini shapes it into a production-ready prompt and fires it straight into your prompts window in [Antigravity](https://antigravity.dev). Dictate, enhance, send: all by voice, no keyboard required once you're rolling.
 
-> **⚠️ Heads up:** This extension is pretty vibe-coded. After the voice pipeline was working, I started using VTP itself to build the rest of it — so there are rough edges but it works, it's useful, and it's being actively improved.
+> **⚠️ Heads up:** This extension is pretty vibe-coded. After the voice pipeline was working, I started using STP itself to build the rest of it — so there are rough edges but it works, it's useful, and it's being actively improved.
 
 ---
 
