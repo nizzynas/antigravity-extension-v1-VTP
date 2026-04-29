@@ -1,26 +1,94 @@
 # STP — Speech to Prompt
 
-> **Speech-driven AI coding. Dictate. Enhance. Send. Completely hands-free.**
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-NVS%20Tech-0A66C2?style=flat&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/nvstech/)
 
-STP turns your voice into a full AI coding workflow. Click once to start recording, then speak your idea — Gemini shapes it into a production-ready prompt and fires it straight into your prompts window in [Antigravity](https://antigravity.dev). Dictate, enhance, send: all by voice, no keyboard required once you're rolling.
+> **Talk to Antigravity. Completely hands-free.**
 
-> **⚠️ Heads up:** This extension is pretty vibe-coded. After the voice pipeline was working, I started using STP itself to build the rest of it — so there are rough edges but it works, it's useful, and it's being actively improved.
+STP is an Antigravity extension that lets you create prompts by voice and fire them straight into your [Antigravity](https://antigravity.dev) chat. No typing, no copy-paste, no need to press send, you say it out loud. You talk, it listens, you can ask Gemini to clean it up, you can enhance it or you can send it straight away — all without touching the keyboard or mouse.
+
+> After the voice pipeline was working, I used the STP extension to build the rest of the extension — so there are some rough edges, but it works, it's useful, and it's being actively improved.
 
 ---
 
-## ✨ Features
+## 🎬 How It Works in Practice
 
-- 🎙 **FFmpeg + Gemini pipeline** — audio is captured locally by FFmpeg, denoised, and transcribed by Gemini. No browser dependency, no cloud STT lock-in.
-- ⚡ **Optional Deepgram real-time mode** — drop latency from ~5s to ~300ms with a free Deepgram API key. Completely opt-in. See [Deepgram section](#-deepgram-optional--real-time-transcription) below.
-- 🔇 **Built-in noise suppression** — a 3-stage FFmpeg filter chain (`highpass → afftdn → silencedetect`) strips low-frequency rumble and PC background noise before audio ever reaches Gemini.
+### Basic flow — dictate and send
+
+> *You speak:*
+> "Build a staff availability page. Each staff member should be able to set their weekly schedule using a calendar-style UI. Use the existing card styling from the dashboard. **Send the prompt.**" 
+
+STP picks up `send the prompt`, injects your prompt directly into Antigravity chat, no need to press send, and restarts the mic. Done.
+
+---
+
+### Enhance flow — let Gemini polish it first
+
+> *You speak:*
+> "I need a modal that pops up when a staff member tries to set their availability but hasn't selected their service category yet. It should block them and prompt them to save their categories first. **Enhance this prompt.**"
+
+Gemini rewrites it into a precise, production-ready spec. You see the enhanced version inline and say:
+
+> *"Approve."* → fires into Antigravity.
+> *"Reject."* → restores your original.
+> *"Try again."* → Gemini takes another pass.
+
+---
+
+### Clean flow — strip noise before sending
+
+Say something awkward mid-dictation? Someone walked in? No problem:
+
+> *You speak:*
+> "Add rate limiting to the API — hold on, hey, yeah I'll be right there — okay where was I — add a 429 response with a Retry-After header. **Clean it up. Send the prompt.**"
+
+`Clean it up` runs Gemini with a strict strip-only pass: fillers, interruptions, and off-topic noise are removed. Your actual intent is preserved. Then `send the prompt` fires it.
+
+---
+
+### Pause and resume — mid-session
+
+> *You speak:*
+> "Build a login page with Google OAuth and — **pause.**"
+
+Mic mutes immediately. Buffer is preserved. Later:
+
+> *"Resume."* → mic wakes back up exactly where you left off.
+
+---
+
+## ✨ What's Under the Hood
+
+- 🎙 **FFmpeg + Gemini pipeline** — audio captured locally, denoised, transcribed. No browser dependency, no cloud STT lock-in.
+- ⚡ **Optional Deepgram real-time mode** — drops latency from ~5s to ~300ms with a free key. Highly recommended for voice commands. See [Deepgram section](#-deepgram-optional--real-time-transcription) below.
 - 🧠 **Gemini enhancement** — say *"enhance this prompt"* and get a polished, context-aware rewrite inline
+- 🧹 **Voice cleanup** — say *"clean it up"* to strip filler words, background interruptions, and noise without touching your intent
 - ✅ **Approve / Reject / Try Again** — review enhancements with buttons or purely by voice
-- 🚀 **Hands-free send** — say *"send it"* or *"send the prompt"* and your prompt is injected into Antigravity instantly. No clicking, no copy-paste, nothing.
-- ⏸ **Smart auto-pause** — silence detection auto-pauses after you stop talking, then restarts automatically for continuous listening
-- ⚡ **Full voice control** — pause, resume, send, clear, enhance — all without touching the mouse
-- 📎 **Workspace context** — automatically reads your open files, active conversation, and workspace name for smarter prompts
-- 🧩 **Multi-memory context** — layer additional past Antigravity conversations on top of the auto-detected primary. Add or remove extras at any time; they feed into enhancements as read-only supplementary context.
+- 🚀 **Hands-free send** — say *"send it"* or *"send the prompt"* — prompt is injected into Antigravity instantly
+- ⏸ **Smart pause/resume** — mic mutes on *"pause"*, wakes on *"resume"* — buffer preserved throughout
+- 📎 **Workspace context** — reads your open files, active conversation, and workspace name for smarter enhancements
+- 🧩 **Multi-memory context** — layer past Antigravity conversations as supplementary context for even richer elaborations
 - 🔑 **Secure key storage** — Gemini API key stored in VS Code SecretStorage, never in code or config files
+- 🔇 **Built-in noise suppression** — 3-stage FFmpeg filter chain strips low-frequency rumble before audio reaches Gemini
+
+---
+
+## 🗣 Voice Command Reference
+
+Commands work **mid-sentence** — you don't have to say them alone. Say them naturally as part of your dictation.
+
+| Say | What happens |
+|---|---|
+| *(just talk)* | Appends to your prompt buffer |
+| `send it` / `send the prompt` | **Injects directly into Antigravity — no click, no paste** |
+| `enhance this prompt` | Rewrites with Gemini. Approve / Reject / Try Again inline |
+| `clean it up` / `scrub that` | Strips filler words and noise — never expands or rewrites |
+| `approve` / `reject` / `try again` | Voice-control the enhancement review |
+| `pause` / `mute` / `stop listening` | Mutes mic; buffer preserved |
+| `resume` / `continue` / `I'm back` | Wakes from pause |
+| `clear transcript` / `clear that` | Discards the current buffer — must be said alone |
+| `open the terminal` / `run tests` | IDE commands — no prompt involved |
+
+> 💡 Commands are ~10× faster in Deepgram mode (~300ms) vs Gemini chunked mode (~5s).
 
 ---
 
@@ -32,72 +100,47 @@ STP turns your voice into a full AI coding workflow. Click once to start recordi
 ```
 winget install ffmpeg
 ```
-
 Or download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to your system PATH. Restart VS Code after installing.
 
 ### 2. Get a Gemini API Key
 
 Get a key at [aistudio.google.com](https://aistudio.google.com/apikey) — **no credit card required**. The free tier (~15 req/min) is enough for normal use.
 
-### 3. Add your key to VTP
+### 3. Add your key to STP
 
-Open the VTP panel from the Activity Bar, click **KEY**, and paste your Gemini API key. It's stored in VS Code SecretStorage (your OS credential manager) — never in a file, never leaves your machine.
+Open the STP panel from the Activity Bar, click **KEY**, and paste your Gemini API key. Stored in VS Code SecretStorage — never in a file, never leaves your machine.
 
 ### 4. Start talking
 
-Click the microphone button and start dictating. Audio processes in 3-second chunks — so you'll see the transcript update every few seconds as you speak.
+Click the microphone button and start dictating. In Gemini mode, audio processes in 3-second chunks — transcript updates live as you speak.
 
 ### 5. (Recommended) Enable Deepgram for real-time transcription
 
-By default VTP uses Gemini for transcription, which works offline but has ~4-7s chunk latency. **We recommend enabling Deepgram** — it's free, takes 2 minutes to set up, and drops latency to ~300ms so voice commands feel instant.
+By default STP uses Gemini for transcription (offline, no extra keys, ~4-7s latency). **Enable Deepgram** for ~300ms latency and instant voice command response — it's free and takes 2 minutes.
 
-Click the **⚡ LIVE** button in the VTP panel header and follow the onboarding. Totally up to you — Gemini mode works fine if you'd rather keep everything local and free of third-party services.
+Click **⚡ LIVE** in the STP panel header and follow the onboarding.
 
 ---
 
 ## ⚡ Deepgram (Optional) — Real-Time Transcription
 
-By default, VTP uses **FFmpeg + Gemini** for transcription. This works offline (no extra keys) but has ~4-7s of latency per chunk.
+Deepgram is an optional, opt-in 3rd-party service that drops transcription latency to ~300ms via real-time streaming. A **free API key** is all you need.
 
-**Deepgram** is an optional, opt-in 3rd-party service that reduces this to ~300ms with real-time streaming. A **free API key is all you need** — no credit card required.
-
-To enable it: click the **⚡ LIVE** button in the VTP panel and follow the onboarding flow. Your key is stored in VS Code SecretStorage and is never sent anywhere except Deepgram's API during recording.
+Click the **⚡ LIVE** button in the panel and follow the onboarding. Your key is stored in VS Code SecretStorage and only sent to Deepgram's API during recording.
 
 ### Deepgram Data Usage
 
-> Based on publicly available Deepgram documentation and user discussions (early 2026). See [deepgram.com/privacy](https://deepgram.com/privacy) for the authoritative source.
+> Based on publicly available Deepgram documentation (early 2026). See [deepgram.com/privacy](https://deepgram.com/privacy) for the authoritative source.
 
 | Feature | Default | Opt-out |
 |---|---|---|
 | **Transcription** | Audio sent to Deepgram's API during recording | — |
-| **Model training** | Deepgram may use your audio to improve their models (50% discount applied) | Add `mip_opt_out=true` to API requests (discount removed) |
+| **Model training** | May use audio to improve models (50% discount applied) | Add `mip_opt_out=true` to API requests |
 | **Data selling** | **No** — Deepgram does not sell your voice data | — |
-| **Data retention** | Logs retained ~90 days | Opt-out: data deleted after processing |
+| **Data retention** | Logs retained ~90 days | Opt-out: deleted after processing |
 | **Compliance** | HIPAA, GDPR, CCPA, SOC-2 Type 2, TLS 1.3, AES-256 | — |
 
-**Key points:**
-- Deepgram does **not** sell your voice data to third parties
-- You own your data — it's processed under their service agreement
-- The free tier is sufficient for VTP usage
-- For maximum privacy: opt out of model improvement by setting `mip_opt_out=true` (you'll lose the 50% model-improvement discount, but the free tier is unaffected)
-- Enterprise users can use on-premises or VPC deployment to keep data within their own infrastructure
-
 👉 [Get a free Deepgram API key](https://console.deepgram.com) | [Privacy policy](https://deepgram.com/privacy)
-
----
-
-## 🗣 Voice Command Reference
-
-| Say | What happens |
-|---|---|
-| *(just talk)* | Appends to your prompt buffer |
-| `send it` / `send the prompt` | **Injects directly into Antigravity — hands-free, no click, no paste** |
-| `enhance this prompt` | Rewrites with Gemini. Approve / Reject / Try Again inline |
-| `approve` / `reject` / `try again` | Voice-control the enhancement review |
-| `pause` / `stop listening` | Mutes mic; already-spoken speech finishes processing first |
-| `resume` / `continue` / `I'm back` | Wakes from pause |
-| `clear transcript` / `clear that` | Discards the current transcript buffer |
-| `open the terminal` / `run tests` | IDE commands — runs without touching the prompt |
 
 ---
 
@@ -186,7 +229,6 @@ No WAV files written. No chunks. Audio streams directly in real-time for near-in
 - [Google Gemini API](https://ai.google.dev/) — transcription, intent classification + prompt enhancement
 - [FFmpeg](https://ffmpeg.org/) — audio capture, noise suppression, VAD
 - [Deepgram](https://deepgram.com/) — optional real-time streaming transcription
-- Vibe coded with [Antigravity](https://antigravity.dev) 🤙
 
 ---
 

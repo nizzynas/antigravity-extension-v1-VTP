@@ -4,6 +4,14 @@ All notable changes to VTP — Voice to Prompt are documented here.
 
 ---
 
+## [0.1.21] — 2026-04-29
+### Changed
+- **README overhaul** — replaced vague feature list opener with four concrete workflow examples: basic dictate+send, enhance+approve, clean-up mid-sentence noise, and pause+resume. Gives new users an immediate sense of how it actually feels to use STP.
+- **Updated extension description** — more direct: *"Dictate coding prompts by voice, clean them up, enhance with Gemini, and fire them straight into Antigravity."*
+- **Voice command table** — now includes `clean it up`/`scrub that`, `mute`, clarifies that `clear that` must be said alone, and notes the ~10× speed difference between Deepgram and Gemini modes.
+
+---
+
 ## [0.1.20] — 2026-04-29
 ### Fixed
 - **"Clear that" wiping mid-sentence dictation** — the clear command regex in Gemini chunked mode was unanchored (`\b` match), so saying "Clear that. Perfect. Okay. So for availabilities..." as part of a long dictation would wipe the entire buffer when the final transcript was assembled. Regex is now anchored (`^...$`) — the entire segment must be the clear command, matching the Deepgram mode behaviour.

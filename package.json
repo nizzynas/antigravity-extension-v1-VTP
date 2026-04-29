@@ -1,8 +1,8 @@
 {
     "name": "vtp-voice-prompt",
     "displayName": "STP — Speech to Prompt",
-    "description": "Speech-to-prompt for Antigravity. Dictate, enhance with Gemini, and fire prompts into Antigravity — entirely by voice, inside VS Code.",
-    "version": "0.1.20",
+    "description": "Speech-to-prompt for Antigravity. Dictate, enhance with Gemini, and fire prompts into Antigravity — entirely by voice.",
+    "version": "0.1.21",
     "icon": "media/icon.png",
     "publisher": "nizzynas",
     "license": "MIT",
@@ -88,7 +88,10 @@
                 },
                 "vtp.transcriptionEngine": {
                     "type": "string",
-                    "enum": ["gemini", "deepgram"],
+                    "enum": [
+                        "gemini",
+                        "deepgram"
+                    ],
                     "enumDescriptions": [
                         "Built-in Gemini chunked transcription (default, no extra setup required)",
                         "Optional Deepgram real-time streaming (~300ms latency, requires free Deepgram API key)"
