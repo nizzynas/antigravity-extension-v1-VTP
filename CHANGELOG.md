@@ -4,6 +4,22 @@ All notable changes to STP — Speech to Prompt are documented here.
 
 ---
 
+## [1.0.0] — 2026-04-29
+#### What's in 1.0.0
+- **Wake-phrase activation** — say "hey antigravity" (or your custom phrase) to start a session hands-free
+- **Dual transcription engines** — Gemini chunked (built-in, no setup) or Deepgram streaming (~300ms latency)
+- **Pause & Resume** — say "pause" mid-dictation, say "resume" to continue; transcript buffer is preserved
+- **Prompt enhancement** — say "enhance this prompt" for a Gemini rewrite with approve / reject / try again
+- **Hands-free send** — say "send it" / "send the prompt" to inject and submit directly into Antigravity
+- **Onboarding wizard** — guided first-run setup for engine selection and API keys
+- **Voice commands** — clear, clean it up, side commands, mute
+- **Workspace context** — open files and active Antigravity conversation injected automatically
+
+### Changed
+- **README demo video** — updated to new hands-free demo
+
+---
+
 ## [0.1.29] — 2026-04-29
 ### Fixed
 - **manual Pause button did not actually pause** — clicking ⏸ left the mic actively recording. Two-part fix: (1) `pauseRecording()` in VTPPanel.ts now calls `capture.kill()` and starts the wake monitor, matching the voice-triggered pause path. (2) UI now removes the red recording ring via `btnRecord.classList.remove('recording')` in `setPaused()`.

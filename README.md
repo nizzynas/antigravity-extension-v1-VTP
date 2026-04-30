@@ -11,15 +11,15 @@ STP is an Antigravity extension that lets you dictate, enhance, and send prompts
 
 ---
 
+## Watch the Demo
+
 <p align="center">
-  <a href="https://youtu.be/mHLq4UxsS2Y">
-    <img src="https://img.youtube.com/vi/mHLq4UxsS2Y/maxresdefault.jpg" alt="STP Demo Video" width="720" />
+  <a href="https://www.youtube.com/watch?v=fAC30bak_xY">
+    <img src="https://img.youtube.com/vi/fAC30bak_xY/maxresdefault.jpg" alt="STP Hands-Free Demo Video" width="720" />
   </a>
   <br />
-  <em>Watch the demo — click to open on YouTube</em>
+  <em>Click to open on YouTube</em>
 </p>
-
----
 
 ## Completely Hands-Free
 
