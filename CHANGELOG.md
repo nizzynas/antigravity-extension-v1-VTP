@@ -4,6 +4,12 @@ All notable changes to STP — Speech to Prompt are documented here.
 
 ---
 
+## [1.0.1] — 2026-04-29
+### Fixed
+- **Context panel hijacked by other windows** — each VTP panel now locks to its own conversation on first load. When a message is sent in a different VS Code window, the file-system watcher detects that the changed conversation ID doesn't match the lock and ignores it. Sending a prompt from the current window clears and re-acquires the lock so the panel always tracks the correct chat.
+
+---
+
 ## [1.0.0] — 2026-04-29
 #### What's in 1.0.0
 - **Wake-phrase activation** — say "hey antigravity" (or your custom phrase) to start a session hands-free

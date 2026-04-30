@@ -55,6 +55,14 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private _extraConversations: ScoredConversation[] = [];
   /** Tracks interimTranscript.length at the time of last async classify call. */
   private _lastAsyncClassifiedLength = 0;
+  /**
+   * The conversation ID this panel is locked to.
+   * Once set, brain-watcher events for OTHER conversations are ignored so that
+   * sending a message in a different VS Code window does not hijack this panel.
+   * Cleared before an explicit `onSend` so the panel re-locks to whichever
+   * conversation the user just sent to.
+   */
+  private _lockedConversationId: string | null = null;
 
   private intentProcessor: IntentProcessor | null = null;
   private commandExecutor: CommandExecutor | null = null;
@@ -379,9 +387,24 @@ export class VTPPanel implements vscode.WebviewViewProvider {
           brainDir,
           { recursive: true, persistent: false },
           (_event, filename) => {
-            if (filename && (filename.includes('overview') || filename.includes('system_generated'))) {
-              this.scheduleRefresh();
+            if (!filename) return;
+            if (!(filename.includes('overview') || filename.includes('system_generated'))) return;
+
+            // Extract the conversation ID — the first path segment under brainDir.
+            // On Windows filename looks like: "d87fa931-...\\logs\\overview.txt"
+            // On POSIX: "d87fa931-.../logs/overview.txt"
+            const changedConvId = filename.split(/[\\/]/)[0];
+
+            // If we have a lock and this change is for a DIFFERENT conversation,
+            // ignore it — another window is active in that chat, not ours.
+            if (this._lockedConversationId && changedConvId && changedConvId !== this._lockedConversationId) {
+              this.log.appendLine(
+                `[VTP] Brain change ignored — belongs to conv ${changedConvId.slice(0, 8)}, locked to ${this._lockedConversationId.slice(0, 8)}.`,
+              );
+              return;
             }
+
+            this.scheduleRefresh();
           },
         );
         this._brainWatcher.on('error', (err) => {
@@ -1490,6 +1513,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     await this.chatInjector.inject(prompt);
     this.promptBuffer = '';
     this.send({ type: 'injected' });
+    // Clear the lock so the next refresh re-detects and re-locks to the
+    // conversation that is now newest (the one this window just sent to).
+    this._lockedConversationId = null;
+    this.log.appendLine('[VTP] Conversation lock cleared — will re-lock on next context refresh.');
   }
 
   private async injectRaw(): Promise<void> {
@@ -1499,6 +1526,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.promptBuffer = '';
     this.interimTranscript = '';
     this.send({ type: 'injected' });
+    // Clear the lock so the next refresh re-locks to whichever conversation
+    // is now newest (the one this window just sent to).
+    this._lockedConversationId = null;
   }
 
   private async asyncCheckIntent(snapshot: string): Promise<void> {
@@ -1637,6 +1667,13 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
       this.cachedContext = context;
       this.cachedConversation = conversation;
+
+      // Lock this panel to the detected conversation so that future brain-watcher
+      // events from other conversations don't trigger a context switch.
+      if (conversation?.id && !this._lockedConversationId) {
+        this._lockedConversationId = conversation.id;
+        this.log.appendLine(`[VTP] Locked to conversation ${conversation.id.slice(0, 8)} — "${newTitle.slice(0, 60)}".`);
+      }
 
       if (changed) {
         const shortTitle = newTitle.length > 60 ? newTitle.slice(0, 57) + '...' : newTitle;
