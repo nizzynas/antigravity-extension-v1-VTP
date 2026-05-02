@@ -3,6 +3,9 @@
 
 export type IntentType = 'PROMPT_CONTENT' | 'COMMAND' | 'SEND' | 'ENHANCE' | 'CANCEL';
 
+/** Where VTP routes injected prompts. Antigravity = native chat; claude-code = patched Claude Code extension. */
+export type InjectionTarget = 'antigravity' | 'claude-code';
+
 export interface IntentResult {
   type: IntentType;
   /** Cleaned text (filler words removed). Populated for PROMPT_CONTENT. */

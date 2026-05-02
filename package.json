@@ -17,7 +17,12 @@
         "voice coding",
         "speech to prompt",
         "voice to prompt",
-        "stp"
+        "stp",
+        "voice assistant",
+        "voice control",
+        "speech recognition",
+        "hands-free coding",
+        "voice ide"
     ],
     "repository": {
         "type": "git",
@@ -69,6 +74,22 @@
             {
                 "command": "vtp.toggleRecording",
                 "title": "VTP: Toggle Recording"
+            },
+            {
+                "command": "vtp.switchTarget",
+                "title": "VTP: Switch Injection Target (Antigravity / Claude Code)"
+            },
+            {
+                "command": "vtp.patchClaudeCode",
+                "title": "VTP: (Re-)apply Claude Code Patch"
+            },
+            {
+                "command": "vtp.restoreClaudeCode",
+                "title": "VTP: Restore Claude Code (Unpatch)"
+            },
+            {
+                "command": "vtp.claudeCodeStatus",
+                "title": "VTP: Show Claude Code Patch Status"
             }
         ],
         "keybindings": [
@@ -173,6 +194,19 @@
                     "type": "string",
                     "default": "hey antigravity",
                     "description": "The wake phrase VTP listens for when voice activation is enabled. Shorter phrases (e.g. 'hey vtp') are easier to trigger reliably."
+                },
+                "vtp.injectionTarget": {
+                    "type": "string",
+                    "enum": [
+                        "antigravity",
+                        "claude-code"
+                    ],
+                    "enumDescriptions": [
+                        "Send prompts to Antigravity's native chat (default).",
+                        "Send prompts to the Anthropic Claude Code extension chat. Requires running 'VTP: (Re-)apply Claude Code Patch' once, and forces the Deepgram transcription engine."
+                    ],
+                    "default": "antigravity",
+                    "description": "Where VTP routes injected prompts. Switching to Claude Code automatically enforces the Deepgram engine for low-latency voice commands."
                 }
             }
         }

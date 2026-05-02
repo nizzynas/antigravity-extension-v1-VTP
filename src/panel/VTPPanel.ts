@@ -485,7 +485,24 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this._lastAsyncClassifiedLength = 0;
       const sessionGen          = ++this._sessionGen;
 
-      const engine = vscode.workspace.getConfiguration('vtp').get<string>('transcriptionEngine', 'gemini');
+      const cfgRoot = vscode.workspace.getConfiguration('vtp');
+      const engine  = cfgRoot.get<string>('transcriptionEngine', 'gemini');
+      const target  = cfgRoot.get<string>('injectionTarget', 'antigravity');
+      // Hard guard: Claude Code target requires Deepgram (low-latency commands).
+      if (target === 'claude-code' && engine !== 'deepgram') {
+        const action = await vscode.window.showWarningMessage(
+          'VTP: Claude Code target requires the Deepgram engine. Switch to Deepgram now or revert target to Antigravity.',
+          'Switch to Deepgram',
+          'Revert to Antigravity',
+        );
+        if (action === 'Switch to Deepgram') {
+          await cfgRoot.update('transcriptionEngine', 'deepgram', vscode.ConfigurationTarget.Global);
+        } else if (action === 'Revert to Antigravity') {
+          await cfgRoot.update('injectionTarget', 'antigravity', vscode.ConfigurationTarget.Global);
+        }
+        this.log.appendLine('[VTP] Recording aborted — Claude Code requires Deepgram engine.');
+        return;
+      }
       const dgKey  = engine === 'deepgram'
         ? await this.secretManager.getSecret('vtp.deepgramApiKey')
         : undefined;

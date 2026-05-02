@@ -1,32 +1,63 @@
 import * as vscode from 'vscode';
+import type { InjectionTarget } from '../types';
 
 /**
- * Injects the final prompt into Antigravity chat.
- *
- * Strategy (in order of preference):
- *  1. Try `antigravity.sendPromptToAgentPanel` with the prompt string as arg
- *     — this command IS able to write to the chat input (we've seen it write text).
- *     We call it WITHOUT pre-focusing the panel to avoid the auto-attach
- *     behavior that prepended `@terminal:powershell` last time.
- *  2. Fallback: clipboard + show "Ctrl+V" notification with panel focus
+ * Routes a final prompt into either Antigravity (native chat) or Claude Code
+ * (the hot-patched extension). Target is read from the `vtp.injectionTarget`
+ * setting on every inject() call so the user can switch live.
  */
 export class ChatInjector {
+  private readonly antigravity = new AntigravityStrategy();
+  private readonly claudeCode  = new ClaudeCodeStrategy();
+
+  /** Read current target from settings (live, not cached). */
+  static currentTarget(): InjectionTarget {
+    const t = vscode.workspace.getConfiguration('vtp').get<string>('injectionTarget', 'antigravity');
+    return t === 'claude-code' ? 'claude-code' : 'antigravity';
+  }
+
+  /**
+   * Inject a prompt and submit it.
+   * @param prompt - the text to send
+   * @param submit - default true; pass false to "stage" without submitting
+   */
+  async inject(prompt: string, submit = true): Promise<void> {
+    const target = ChatInjector.currentTarget();
+    if (target === 'claude-code') {
+      await this.claudeCode.inject(prompt, submit);
+    } else {
+      await this.antigravity.inject(prompt, submit);
+    }
+  }
+
+  /** Submit whatever's already in the composer (used after a "stage" inject). */
+  async submitOnly(): Promise<void> {
+    const target = ChatInjector.currentTarget();
+    if (target === 'claude-code') {
+      await this.claudeCode.submitOnly();
+    } else {
+      // Antigravity has no separate submit-only path today — paste an empty
+      // string with submit=false (no-op), and let the user press Enter manually.
+      // (No call needed.)
+    }
+  }
+}
+
+// ─── Antigravity strategy (existing behaviour, preserved) ────────────────────
+
+class AntigravityStrategy {
   private didLogCommands = false;
 
-  async inject(prompt: string): Promise<void> {
+  async inject(prompt: string, submit = true): Promise<void> {
     if (!this.didLogCommands) {
       this.didLogCommands = true;
       await this.logAntigravityCommands();
     }
 
-    // ── Attempt 1: sendPromptToAgentPanel with our text as argument ──────────
-    // The @terminal:powershell that appeared before was caused by focusing the
-    // panel FIRST (which triggered Antigravity's auto-attach). Calling the
-    // command directly with text — no pre-focus — should send clean text.
     const sent = await this.trySendPromptCommand(prompt);
     if (sent) return;
 
-    // ── Attempt 2: Clipboard + focus + Ctrl+V notification ───────────────────
+    // Fallback: clipboard + focus + Ctrl+V notification (legacy path)
     await vscode.env.clipboard.writeText(prompt);
     await this.focusAntigravityPanel();
 
@@ -37,17 +68,12 @@ export class ChatInjector {
     if (action === 'Copy Again') {
       await vscode.env.clipboard.writeText(prompt);
     }
+    // submit flag: not honoured in fallback path (user pastes manually anyway)
+    void submit;
   }
 
-  /**
-   * Attempts to call antigravity.sendPromptToAgentPanel with the prompt text.
-   * Returns true if the command executed without throwing.
-   */
   private async trySendPromptCommand(prompt: string): Promise<boolean> {
     try {
-      // Pass the prompt string directly as the command argument.
-      // Do NOT call agentSidePanel.focus first — that triggers the
-      // auto-attach of terminal context (@terminal:powershell).
       await vscode.commands.executeCommand('antigravity.sendPromptToAgentPanel', prompt);
       return true;
     } catch {
@@ -55,15 +81,8 @@ export class ChatInjector {
     }
   }
 
-  /**
-   * Focuses the Antigravity agent side panel without triggering context attach.
-   * Only used in the clipboard fallback path.
-   */
   private async focusAntigravityPanel(): Promise<void> {
-    const candidates = [
-      'antigravity.agentSidePanel.focus',
-      'antigravity.openAgent',
-    ];
+    const candidates = ['antigravity.agentSidePanel.focus', 'antigravity.openAgent'];
     for (const cmd of candidates) {
       try { await vscode.commands.executeCommand(cmd); return; } catch { /* next */ }
     }
@@ -79,5 +98,49 @@ export class ChatInjector {
         agCmds.forEach((c) => channel.appendLine('  ' + c));
       }
     } catch { /* non-critical */ }
+  }
+}
+
+// ─── Claude Code strategy (uses hot-patched commands) ────────────────────────
+
+class ClaudeCodeStrategy {
+  /**
+   * Calls the patched-in `claude-code.injectPromptVTP` command. Falls back to a
+   * clear error if the command is missing (means VTP's patch hasn't applied,
+   * or the user manually unpatched).
+   */
+  async inject(prompt: string, submit = true): Promise<void> {
+    const ok = await this.tryInjectCommand(prompt, submit);
+    if (ok) return;
+
+    vscode.window.showErrorMessage(
+      'VTP: Claude Code injection command not found. Run "VTP: Re-apply Claude Code Patch" or switch target to Antigravity.',
+      'Re-apply Patch',
+      'Switch to Antigravity',
+    ).then(async (action) => {
+      if (action === 'Re-apply Patch') {
+        await vscode.commands.executeCommand('vtp.patchClaudeCode');
+      } else if (action === 'Switch to Antigravity') {
+        await vscode.workspace.getConfiguration('vtp')
+          .update('injectionTarget', 'antigravity', vscode.ConfigurationTarget.Global);
+      }
+    });
+  }
+
+  async submitOnly(): Promise<void> {
+    try {
+      await vscode.commands.executeCommand('claude-code.submitVTP');
+    } catch (e: any) {
+      vscode.window.showErrorMessage('VTP: claude-code.submitVTP failed: ' + (e?.message ?? e));
+    }
+  }
+
+  private async tryInjectCommand(prompt: string, submit: boolean): Promise<boolean> {
+    try {
+      await vscode.commands.executeCommand('claude-code.injectPromptVTP', prompt, submit);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
