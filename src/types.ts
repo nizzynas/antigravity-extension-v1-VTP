@@ -65,6 +65,10 @@ export type PanelMessage =
   | { type: 'manageDeepgramKey' }
   /** User clicked the ⌨ KEY button — open VS Code keyboard shortcut editor for VTP */
   | { type: 'openKeybindings' }
+  /** User clicked the target toggle button — open the target picker */
+  | { type: 'switchInjectionTarget' }
+  /** User wants to (re)lock the Claude Code conversation target */
+  | { type: 'lockClaudeConversation' }
   /** Onboarding completed — persist engine choice, keys, and flow preferences */
   | { type: 'onboardingComplete'; engine: 'gemini' | 'deepgram'; geminiKey?: string; deepgramKey?: string; activationMode: 'wake' | 'manual'; postSendMode: 'continuous' | 'pause'; wakePhrase: string }
   /** Settings panel saved new preferences */
@@ -104,4 +108,6 @@ export type ExtensionMessage =
   /** Tell the webview to render the first-run onboarding wizard */
   | { type: 'showOnboarding' }
   /** Notify webview of current flow settings (sent on ready + after applySettings) */
-  | { type: 'settingsStatus'; activationMode: 'wake' | 'manual'; postSendMode: 'continuous' | 'pause'; wakePhrase: string };
+  | { type: 'settingsStatus'; activationMode: 'wake' | 'manual'; postSendMode: 'continuous' | 'pause'; wakePhrase: string }
+  /** Current injection target + (optional) Claude Code lock label, sent on ready and after switch */
+  | { type: 'targetState'; target: 'antigravity' | 'claude-code'; lockedTitle: string };

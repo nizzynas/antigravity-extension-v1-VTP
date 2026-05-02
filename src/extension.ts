@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { VTPPanel } from './panel/VTPPanel';
 import { SecretManager } from './config/SecretManager';
 import { ensurePatched, restoreOriginal, getStatus } from './integrations/claudeCode/patcher';
+import { pickAndLockConversation, getLockedTitle, setLockedTitle, listClaudeConversations } from './integrations/claudeCode/conversations';
 
 let panel: VTPPanel | undefined;
 export let logger: vscode.OutputChannel;
@@ -126,10 +127,44 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage('VTP: Claude Code extension not installed.');
         return;
       }
+      const locked = getLockedTitle();
       const line1 = `Claude Code v${s.version} — ${s.patched ? 'patched ✓' : 'unpatched'}`;
-      const line2 = s.marker ? `Patched at ${s.marker.appliedAt}` : '';
-      const line3 = s.marker ? `Backup: ${s.marker.backupDir}` : '';
+      const line2 = s.marker?.appliedAt ? `Patched at ${s.marker.appliedAt}` : '';
+      const line3 = locked ? `Locked to: "${locked}"` : 'Lock: none (fans to all chats)';
       vscode.window.showInformationMessage(`VTP: ${line1}\n${line2}\n${line3}`.trim());
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vtp.lockClaudeConversation', async () => {
+      await pickAndLockConversation();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vtp.unlockClaudeConversation', async () => {
+      const current = getLockedTitle();
+      if (!current) {
+        vscode.window.showInformationMessage('VTP: No conversation is currently locked.');
+        return;
+      }
+      await setLockedTitle('');
+      vscode.window.showInformationMessage(`VTP: unlocked (was "${current}").`);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vtp.listClaudeConversations', async () => {
+      const convs = listClaudeConversations();
+      if (convs.length === 0) {
+        vscode.window.showInformationMessage('VTP: No Claude Code conversation tabs are open.');
+        return;
+      }
+      const locked = getLockedTitle();
+      const lines = convs.map((c) =>
+        `${c.title === locked ? '🔒 ' : '   '}${c.isActive ? '★ ' : '  '}${c.title}`,
+      );
+      vscode.window.showInformationMessage('VTP: Open Claude conversations:\n' + lines.join('\n'));
     }),
   );
 
@@ -138,14 +173,19 @@ export function activate(context: vscode.ExtensionContext): void {
     logger.appendLine(`[VTP] auto-patch error: ${e?.message ?? e}`);
   });
 
-  // Watch for target setting changes — enforce Deepgram for claude-code
+  // Watch for target setting changes — enforce Deepgram for claude-code + refresh panel UI
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((evt) => {
-      if (evt.affectsConfiguration('vtp.injectionTarget')) {
+      const targetChanged = evt.affectsConfiguration('vtp.injectionTarget');
+      const lockChanged   = evt.affectsConfiguration('vtp.claudeCodeLockedTitle');
+      if (targetChanged) {
         const target = vscode.workspace.getConfiguration('vtp').get<string>('injectionTarget', 'antigravity');
         if (target === 'claude-code') {
           ensureDeepgramForClaudeCode(secretManager, logger).catch(() => {});
         }
+      }
+      if (targetChanged || lockChanged) {
+        panel?.sendTargetState().catch(() => {});
       }
     }),
   );

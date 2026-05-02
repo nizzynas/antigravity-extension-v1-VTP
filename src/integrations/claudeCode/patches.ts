@@ -13,6 +13,13 @@ import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
+// ─── Schema version ─────────────────────────────────────────────────────────
+// Bump whenever the patch shape changes. Old markers with a different schema
+// version trigger an auto-restore + re-apply on activation.
+//   v1 — original PoC (no targetTitle filtering)
+//   v2 — targetTitle filtering for per-conversation lock
+export const PATCH_SCHEMA_VERSION = 2;
+
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
 export function findClaudeCodeExtDir(): string | null {
@@ -360,44 +367,45 @@ export const PATCHES: Record<string, Patch> = {
   extJs_innerComm: {
     file: 'extJs',
     anchor: /notifyToggleDictation\(\)\{this\.send\(\{type:"request",channelId:"",requestId:"",request:\{type:"toggle_dictation"\}\}\)\}/,
-    appliedMarker: /notifyVTPInject\(/,
+    // Marker is specific to v2 (with targetTitle) so re-applying upgrades the patch.
+    appliedMarker: /notifyVTPInject\(text,submit,targetTitle\)/,
     replacement: (m) =>
       m
-      + 'notifyVTPInject(text,submit){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_inject_prompt",text:text,submit:submit!==!1}})}'
-      + 'notifyVTPSubmit(){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_submit_only"}})}',
+      + 'notifyVTPInject(text,submit,targetTitle){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_inject_prompt",text:text,submit:submit!==!1,targetTitle:targetTitle||""}})}'
+      + 'notifyVTPSubmit(targetTitle){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_submit_only",targetTitle:targetTitle||""}})}',
   },
   extJs_manager: {
     file: 'extJs',
     anchor: /notifyToggleDictation\(\)\{for\(let V of this\.allComms\)V\.notifyToggleDictation\(\)\}/,
-    appliedMarker: /for\(let V of this\.allComms\)V\.notifyVTPInject\(/,
+    appliedMarker: /for\(let V of this\.allComms\)V\.notifyVTPInject\(text,submit,targetTitle\)/,
     replacement: (m) =>
       m
-      + 'notifyVTPInject(text,submit){for(let V of this.allComms)V.notifyVTPInject(text,submit)}'
-      + 'notifyVTPSubmit(){for(let V of this.allComms)V.notifyVTPSubmit()}',
+      + 'notifyVTPInject(text,submit,targetTitle){for(let V of this.allComms)V.notifyVTPInject(text,submit,targetTitle)}'
+      + 'notifyVTPSubmit(targetTitle){for(let V of this.allComms)V.notifyVTPSubmit(targetTitle)}',
   },
   extJs_commands: {
     file: 'extJs',
     anchor: /(V\.subscriptions\.push\(I4\.commands\.registerCommand\("claude-vscode\.toggleDictation",\(\)=>\{D\.notifyToggleDictation\(\)\}\)\);)/,
-    appliedMarker: /claude-code\.injectPromptVTP/,
+    appliedMarker: /claude-code\.injectPromptVTP.*targetTitle/,
     replacement: (m) =>
       m
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.injectPromptVTP",async(text,submit)=>{'
+      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.injectPromptVTP",async(text,submit,targetTitle)=>{'
       +   'if(!text||typeof text!=="string"){text=await I4.window.showInputBox({prompt:"VTP — prompt to inject into Claude Code",ignoreFocusOut:true});if(!text)return;}'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)");}catch(e){}'
-      +   'try{D.notifyVTPInject(text,submit!==false);}catch(e){I4.window.showErrorMessage("[VTP] dispatch threw: "+e.message);}'
+      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle.slice(0,30)+"\\"":""));}catch(e){}'
+      +   'try{D.notifyVTPInject(text,submit!==false,targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] dispatch threw: "+e.message);}'
       + '}));'
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.submitVTP",()=>{'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)");D.notifyVTPSubmit();}catch(e){I4.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
+      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.submitVTP",(targetTitle)=>{'
+      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle.slice(0,30)+"\\"":""));D.notifyVTPSubmit(targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
       + '}));',
   },
   wvJs_handler: {
     file: 'wvJs',
     anchor: /case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
-    appliedMarker: /case"vtp_inject_prompt":/,
+    appliedMarker: /case"vtp_inject_prompt":[^]*targetTitle/,
     replacement: (m) =>
       m
-      + 'case"vtp_inject_prompt":try{window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
-      + 'case"vtp_submit_only":try{window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
+      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";if(_t&&_t!==document.title){console.log("[VTP] skip inject (title mismatch)",document.title,"vs",_t);}else{window.__vtp_inject($.request.text,$.request.submit)}}catch(e){console.error("[VTP]",e)}break;'
+      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";if(_t2&&_t2!==document.title){console.log("[VTP] skip submit (title mismatch)");}else{window.__vtp_submit()}}catch(e){console.error("[VTP]",e)}break;',
   },
   wvJs_helper: {
     file: 'wvJs',

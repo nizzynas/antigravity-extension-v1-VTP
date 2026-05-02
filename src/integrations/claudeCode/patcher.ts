@@ -13,7 +13,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import {
   PATCHES, ExtensionFiles, applyPatches, patchPackageJson, patchStatus, sha256,
-  findClaudeCodeExtDir, extensionFiles,
+  findClaudeCodeExtDir, extensionFiles, PATCH_SCHEMA_VERSION,
 } from './patches';
 
 export interface PatchStatus {
@@ -22,10 +22,14 @@ export interface PatchStatus {
   version: string | null;
   patched: boolean;
   marker?: PatchMarker;
+  /** True when the marker exists but its patchSchemaVersion is older than current. */
+  schemaOutdated?: boolean;
 }
 
 export interface PatchMarker {
   version: string;
+  /** Patch schema version written at apply time. Used to detect stale patches. */
+  patchSchemaVersion?: number;
   appliedAt: string;
   backupDir: string;
   sha: {
@@ -52,10 +56,11 @@ export function getStatus(): PatchStatus {
   try { version = readPkgVersion(f.pkgJson); } catch { /* ignore */ }
   let marker: PatchMarker | undefined;
   let patched = false;
+  let schemaOutdated = false;
   if (fs.existsSync(f.marker)) {
     try {
       marker = JSON.parse(fs.readFileSync(f.marker, 'utf-8'));
-      // Verify all regex patches still present
+      // Verify all regex patches still present (matches the CURRENT schema)
       const extJs = fs.readFileSync(f.extJs, 'utf-8');
       const wvJs  = fs.readFileSync(f.wvJs,  'utf-8');
       patched = Object.values(PATCHES).every((p) => {
@@ -63,9 +68,10 @@ export function getStatus(): PatchStatus {
         const content = (p as any).file === 'extJs' ? extJs : wvJs;
         return patchStatus(content, p) === 'applied';
       });
+      schemaOutdated = (marker?.patchSchemaVersion ?? 1) < PATCH_SCHEMA_VERSION;
     } catch { /* ignore */ }
   }
-  return { installed: true, extDir, version, patched, marker };
+  return { installed: true, extDir, version, patched, marker, schemaOutdated };
 }
 
 /**
@@ -85,13 +91,27 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
     _log('[VTP/claude-code] extension not installed, skipping patch');
     return false;
   }
-  if (status.patched && status.marker && status.marker.version === status.version) {
-    _log(`[VTP/claude-code] already patched (v${status.version})`);
+
+  // Detect three reasons to re-apply: Claude version changed, our patch schema
+  // changed, or marker exists but patches no longer all match (e.g. partial state).
+  const versionChanged = status.marker && status.marker.version !== status.version;
+  const schemaChanged  = status.schemaOutdated === true;
+  const partialPatch   = status.marker && !status.patched;
+
+  if (status.patched && !versionChanged && !schemaChanged) {
+    _log(`[VTP/claude-code] already patched (v${status.version}, schema v${PATCH_SCHEMA_VERSION})`);
     return false;
   }
-  if (status.patched && status.marker && status.marker.version !== status.version) {
-    _log(`[VTP/claude-code] marker is for v${status.marker.version}, current is v${status.version} — re-applying`);
-    // Restore from backup first to get clean originals
+
+  if (versionChanged) {
+    _log(`[VTP/claude-code] Claude Code v${status.marker!.version} → v${status.version} — re-applying`);
+  } else if (schemaChanged) {
+    _log(`[VTP/claude-code] patch schema v${status.marker?.patchSchemaVersion ?? 1} → v${PATCH_SCHEMA_VERSION} — re-applying`);
+  } else if (partialPatch) {
+    _log('[VTP/claude-code] marker exists but patches incomplete — restoring + re-applying');
+  }
+
+  if (versionChanged || schemaChanged || partialPatch) {
     try { await restoreOriginal(_log); } catch { /* proceed even if restore fails */ }
   }
 
@@ -138,6 +158,7 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
   // Marker
   const marker: PatchMarker = {
     version,
+    patchSchemaVersion: PATCH_SCHEMA_VERSION,
     appliedAt: new Date().toISOString(),
     backupDir: backupSubdir,
     sha: {
@@ -146,7 +167,7 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
     },
   };
   fs.writeFileSync(f.marker, JSON.stringify(marker, null, 2));
-  _log(`[VTP/claude-code] applied for v${version}`);
+  _log(`[VTP/claude-code] applied for v${version} (schema v${PATCH_SCHEMA_VERSION})`);
   return true;
 }
 

@@ -16,6 +16,9 @@ const path = require('path');
 const os   = require('os');
 const crypto = require('crypto');
 
+// Bump in lockstep with src/integrations/claudeCode/patches.ts PATCH_SCHEMA_VERSION.
+const PATCH_SCHEMA_VERSION = 2;
+
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
 /**
@@ -70,15 +73,16 @@ function sha256(s) {
 
 const PATCHES = {
   // Patch 1: extension.js — Inner Comm class. Add notifyVTPInject / notifyVTPSubmit
-  // sibling methods to notifyToggleDictation.
+  // sibling methods to notifyToggleDictation. v2: targetTitle filter.
   extJs_innerComm: {
     file: 'extJs',
     anchor: /notifyToggleDictation\(\)\{this\.send\(\{type:"request",channelId:"",requestId:"",request:\{type:"toggle_dictation"\}\}\)\}/,
-    appliedMarker: /notifyVTPInject\(/,
+    // Marker is specific to v2 so re-apply upgrades the patch.
+    appliedMarker: /notifyVTPInject\(text,submit,targetTitle\)/,
     replacement: (m) =>
       m[0]
-      + 'notifyVTPInject(text,submit){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_inject_prompt",text:text,submit:submit!==!1}})}'
-      + 'notifyVTPSubmit(){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_submit_only"}})}',
+      + 'notifyVTPInject(text,submit,targetTitle){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_inject_prompt",text:text,submit:submit!==!1,targetTitle:targetTitle||""}})}'
+      + 'notifyVTPSubmit(targetTitle){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_submit_only",targetTitle:targetTitle||""}})}',
   },
 
   // Patch 2: extension.js — Manager class (the one with `this.allComms`).
@@ -86,41 +90,40 @@ const PATCHES = {
   extJs_manager: {
     file: 'extJs',
     anchor: /notifyToggleDictation\(\)\{for\(let V of this\.allComms\)V\.notifyToggleDictation\(\)\}/,
-    appliedMarker: /for\(let V of this\.allComms\)V\.notifyVTPInject\(/,
+    appliedMarker: /for\(let V of this\.allComms\)V\.notifyVTPInject\(text,submit,targetTitle\)/,
     replacement: (m) =>
       m[0]
-      + 'notifyVTPInject(text,submit){for(let V of this.allComms)V.notifyVTPInject(text,submit)}'
-      + 'notifyVTPSubmit(){for(let V of this.allComms)V.notifyVTPSubmit()}',
+      + 'notifyVTPInject(text,submit,targetTitle){for(let V of this.allComms)V.notifyVTPInject(text,submit,targetTitle)}'
+      + 'notifyVTPSubmit(targetTitle){for(let V of this.allComms)V.notifyVTPSubmit(targetTitle)}',
   },
 
   // Patch 3: extension.js — register commands on activation. Sibling to toggleDictation.
   extJs_commands: {
     file: 'extJs',
     anchor: /(V\.subscriptions\.push\(I4\.commands\.registerCommand\("claude-vscode\.toggleDictation",\(\)=>\{D\.notifyToggleDictation\(\)\}\)\);)/,
-    appliedMarker: /claude-code\.injectPromptVTP/,
+    appliedMarker: /claude-code\.injectPromptVTP.*targetTitle/,
     replacement: (m) =>
       m[0]
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.injectPromptVTP",async(text,submit)=>{'
+      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.injectPromptVTP",async(text,submit,targetTitle)=>{'
       +   'if(!text||typeof text!=="string"){text=await I4.window.showInputBox({prompt:"VTP — prompt to inject into Claude Code",ignoreFocusOut:true});if(!text)return;}'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)");}catch(e){}'
-      +   'try{D.notifyVTPInject(text,submit!==false);}catch(e){I4.window.showErrorMessage("[VTP] dispatch threw: "+e.message);}'
+      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle.slice(0,30)+"\\"":""));}catch(e){}'
+      +   'try{D.notifyVTPInject(text,submit!==false,targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] dispatch threw: "+e.message);}'
       + '}));'
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.submitVTP",()=>{'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)");D.notifyVTPSubmit();}catch(e){I4.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
+      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.submitVTP",(targetTitle)=>{'
+      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle.slice(0,30)+"\\"":""));D.notifyVTPSubmit(targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
       + '}));',
   },
 
   // Patch 4: webview/index.js — add vtp_inject_prompt + vtp_submit_only cases to
-  // the handleRequestInner switch (where toggle_dictation, create_new_conversation
-  // etc. are dispatched). This is the correct path for IPC requests.
+  // the handleRequestInner switch. v2: filter by targetTitle === document.title.
   wvJs_handler: {
     file: 'wvJs',
     anchor: /case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
-    appliedMarker: /case"vtp_inject_prompt":/,
+    appliedMarker: /case"vtp_inject_prompt":[\s\S]*targetTitle/,
     replacement: (m) =>
       m[0]
-      + 'case"vtp_inject_prompt":try{window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
-      + 'case"vtp_submit_only":try{window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
+      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";if(_t&&_t!==document.title){console.log("[VTP] skip inject (title mismatch)",document.title,"vs",_t);}else{window.__vtp_inject($.request.text,$.request.submit)}}catch(e){console.error("[VTP]",e)}break;'
+      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";if(_t2&&_t2!==document.title){console.log("[VTP] skip submit (title mismatch)");}else{window.__vtp_submit()}}catch(e){console.error("[VTP]",e)}break;',
   },
 
   // Patch 5: webview/index.js — prepend the runtime helper at the very top.
@@ -532,6 +535,7 @@ module.exports = {
   extensionFiles,
   sha256,
   PATCHES,
+  PATCH_SCHEMA_VERSION,
   applyPatches,
   patchPackageJson,
   patchStatus,

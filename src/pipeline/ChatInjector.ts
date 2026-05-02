@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { InjectionTarget } from '../types';
+import { getLockedTitle } from '../integrations/claudeCode/conversations';
 
 /**
  * Routes a final prompt into either Antigravity (native chat) or Claude Code
@@ -108,9 +109,14 @@ class ClaudeCodeStrategy {
    * Calls the patched-in `claude-code.injectPromptVTP` command. Falls back to a
    * clear error if the command is missing (means VTP's patch hasn't applied,
    * or the user manually unpatched).
+   *
+   * If a conversation is locked (vtp.claudeCodeLockedTitle is set), the locked
+   * title is passed as targetTitle so only that webview acts on the message.
+   * Otherwise the message fans out to all open Claude webviews.
    */
   async inject(prompt: string, submit = true): Promise<void> {
-    const ok = await this.tryInjectCommand(prompt, submit);
+    const targetTitle = getLockedTitle();
+    const ok = await this.tryInjectCommand(prompt, submit, targetTitle);
     if (ok) return;
 
     vscode.window.showErrorMessage(
@@ -128,16 +134,17 @@ class ClaudeCodeStrategy {
   }
 
   async submitOnly(): Promise<void> {
+    const targetTitle = getLockedTitle();
     try {
-      await vscode.commands.executeCommand('claude-code.submitVTP');
+      await vscode.commands.executeCommand('claude-code.submitVTP', targetTitle);
     } catch (e: any) {
       vscode.window.showErrorMessage('VTP: claude-code.submitVTP failed: ' + (e?.message ?? e));
     }
   }
 
-  private async tryInjectCommand(prompt: string, submit: boolean): Promise<boolean> {
+  private async tryInjectCommand(prompt: string, submit: boolean, targetTitle: string): Promise<boolean> {
     try {
-      await vscode.commands.executeCommand('claude-code.injectPromptVTP', prompt, submit);
+      await vscode.commands.executeCommand('claude-code.injectPromptVTP', prompt, submit, targetTitle);
       return true;
     } catch {
       return false;

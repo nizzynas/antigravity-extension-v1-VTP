@@ -90,6 +90,18 @@
             {
                 "command": "vtp.claudeCodeStatus",
                 "title": "VTP: Show Claude Code Patch Status"
+            },
+            {
+                "command": "vtp.lockClaudeConversation",
+                "title": "VTP: Lock Claude Conversation (Pick Target Chat)"
+            },
+            {
+                "command": "vtp.unlockClaudeConversation",
+                "title": "VTP: Unlock Claude Conversation"
+            },
+            {
+                "command": "vtp.listClaudeConversations",
+                "title": "VTP: List Open Claude Conversations"
             }
         ],
         "keybindings": [
@@ -207,6 +219,11 @@
                     ],
                     "default": "antigravity",
                     "description": "Where VTP routes injected prompts. Switching to Claude Code automatically enforces the Deepgram engine for low-latency voice commands."
+                },
+                "vtp.claudeCodeLockedTitle": {
+                    "type": "string",
+                    "default": "",
+                    "description": "When set, prompts sent to Claude Code only land in the conversation tab whose label matches this string. Empty = fan to all open Claude Code chats. Use 'VTP: Lock Claude Conversation' to set this interactively."
                 }
             }
         }

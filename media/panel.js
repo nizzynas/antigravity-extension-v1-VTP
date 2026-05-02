@@ -25,6 +25,8 @@
   const btnInfo          = document.getElementById('btn-info');
   const btnDeepgram      = document.getElementById('btn-deepgram');
   const btnHotkey        = document.getElementById('btn-hotkey');
+  const btnTarget        = document.getElementById('btn-target');
+  const btnTargetLabel   = document.getElementById('btn-target-label');
   const spinner          = document.getElementById('spinner');
   const recordHint       = document.getElementById('record-hint');
   const commandSection   = document.getElementById('command-section');
@@ -382,6 +384,19 @@
         btnDeepgram.classList.toggle('dg-active', deepgramActive);
         break;
 
+      case 'targetState':
+        if (btnTarget && btnTargetLabel) {
+          var isClaude = msg.target === 'claude-code';
+          btnTargetLabel.textContent = isClaude ? '→ CC' : '→ AG';
+          btnTarget.classList.toggle('target-claude', isClaude);
+          btnTarget.classList.toggle('target-antigravity', !isClaude);
+          var lockTxt = msg.lockedTitle ? ' 🔒 ' + msg.lockedTitle.slice(0, 20) : '';
+          btnTarget.title = isClaude
+            ? 'Target: Claude Code' + lockTxt + ' — click to switch, shift-click to lock conversation'
+            : 'Target: Antigravity — click to switch';
+        }
+        break;
+
       case 'contextUpdate':
         contextWorkspace.textContent = msg.workspaceName || '—';
         contextConv.textContent      = msg.conversationTitle || '—';
@@ -578,6 +593,22 @@
   btnHotkey.addEventListener('click', () => {
     post({ type: 'openKeybindings' });
   });
+
+  // → Target button — short click switches Antigravity ↔ Claude Code,
+  // long-press / shift-click opens the Claude conversation lock picker.
+  if (btnTarget) {
+    btnTarget.addEventListener('click', (ev) => {
+      if (ev.shiftKey) {
+        post({ type: 'lockClaudeConversation' });
+      } else {
+        post({ type: 'switchInjectionTarget' });
+      }
+    });
+    btnTarget.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      post({ type: 'lockClaudeConversation' });
+    });
+  }
 
   btnApprove.addEventListener('click', () => post({ type: 'enhancementDecision', action: 'approve' }));
   btnReject.addEventListener('click',  () => post({ type: 'enhancementDecision', action: 'reject' }));

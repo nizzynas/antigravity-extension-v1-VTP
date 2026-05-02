@@ -169,6 +169,14 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         );
         this.log.appendLine('[VTP] Opened keyboard shortcut editor for VTP: Toggle Recording.');
         break;
+      case 'switchInjectionTarget':
+        await vscode.commands.executeCommand('vtp.switchTarget');
+        await this.sendTargetState();
+        break;
+      case 'lockClaudeConversation':
+        await vscode.commands.executeCommand('vtp.lockClaudeConversation');
+        await this.sendTargetState();
+        break;
       case 'onboardingComplete':
         await this.handleOnboardingComplete(msg);
         break;
@@ -214,6 +222,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     await this.settings.sendDeepgramKeyStatus();
     await this.checkFFmpeg();
     this.refreshContext();
+    await this.sendTargetState();
 
     // ── Send current flow settings to webview ──────────────────────────────
     this._sendSettingsStatus(config);
@@ -276,6 +285,15 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
 
     this.log.appendLine('[VTP] Onboarding data persisted.');
+  }
+
+  /** Send the current target + lock state to the panel so the button label can update. */
+  public async sendTargetState(): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration('vtp');
+    const target = (cfg.get<string>('injectionTarget', 'antigravity') === 'claude-code'
+      ? 'claude-code' : 'antigravity') as 'antigravity' | 'claude-code';
+    const lockedTitle = cfg.get<string>('claudeCodeLockedTitle', '') || '';
+    this.send({ type: 'targetState', target, lockedTitle });
   }
 
   // ── Voice Activation ─────────────────────────────────────────────────────

@@ -149,8 +149,10 @@ function main() {
   catch (e) { exitErr('package.json is no longer valid JSON after patching: ' + e.message); }
 
   // Marker
+  const { PATCH_SCHEMA_VERSION } = require('./claude-code-patch');
   const marker = {
     version,
+    patchSchemaVersion: PATCH_SCHEMA_VERSION,
     appliedAt: new Date().toISOString(),
     backupDir: backupSubdir,
     sha: {
