@@ -147,7 +147,19 @@
           </tr>
           <tr>
             <td><code>clean it up</code> / <code>scrub that</code></td>
-            <td>Strips filler words — never rewrites.</td>
+            <td>Cleans the buffer in place — silent, no preview.</td>
+          </tr>
+          <tr>
+            <td><code>clean up and review</code> / <code>clean and review</code></td>
+            <td>Cleans + shows preview. Approve / Reject / Try Again inline.</td>
+          </tr>
+          <tr class="glossary-divider">
+            <td colspan="2"><strong>Auto-clean (silent, runs before every send)</strong></td>
+          </tr>
+          <tr>
+            <td colspan="2" class="vc-note">Filler words and immediate repeats are stripped automatically.
+              Heavy noise (self-corrections, "actually", "I mean") triggers an LLM cleanup.
+              Skipped if you already said <code>enhance</code>, <code>clean it up</code>, or <code>clean up and review</code>.</td>
           </tr>
           <tr>
             <td><code>cancel</code> / <code>clear that</code></td>

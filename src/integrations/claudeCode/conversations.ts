@@ -22,6 +22,17 @@ const CLAUDE_VIEW_TYPES = [
 ];
 
 /**
+ * Strip trailing ellipsis ("…" or "...") and surrounding whitespace.
+ * VS Code's tab.label gives us a truncated display form like
+ * "Migrate antigravity data…" but Claude's panel.title (which the patched
+ * extension compares against) is the FULL conversation title. Stripping the
+ * truncation marker lets the substring match in the patch line up correctly.
+ */
+function stripEllipsis(s: string): string {
+  return (s || '').replace(/[….]+\s*$/, '').trim();
+}
+
+/**
  * Returns all open Claude Code conversation tabs (newest active first).
  * Empty array if none open.
  */
@@ -36,7 +47,7 @@ export function listClaudeConversations(): ClaudeConversation[] {
         ? CLAUDE_VIEW_TYPES.some((v) => viewType === v || viewType.endsWith(v))
         : false;
       if (!isClaude) continue;
-      const label = tab.label || '';
+      const label = stripEllipsis(tab.label || '');
       if (!label || seen.has(label)) continue;
       seen.add(label);
       out.push({ title: label, isActive: tab.isActive });

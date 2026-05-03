@@ -708,6 +708,14 @@ button.context-card.context-claude.context-locked .context-workspace {
   padding: 1px 4px;
 }
 
+.glossary-table .vc-note {
+  font-style: italic;
+  color: var(--muted);
+  padding-top: 2px;
+  padding-bottom: 4px;
+  line-height: 1.45;
+}
+
 .glossary-table kbd {
   background: var(--surface);
   border: 1px solid var(--border);

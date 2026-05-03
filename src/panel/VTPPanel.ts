@@ -15,6 +15,7 @@ import { ConversationMatcher } from '../context/ConversationMatcher';
 import { IntentProcessor } from '../pipeline/IntentProcessor';
 import { CommandExecutor } from '../pipeline/CommandExecutor';
 import { PromptElaborator } from '../pipeline/PromptElaborator';
+import { PromptCleaner } from '../pipeline/PromptCleaner';
 import { ChatInjector } from '../pipeline/ChatInjector';
 import { CommandRegistry } from '../commands/CommandRegistry';
 import { AudioCapture } from '../audio/AudioCapture';
@@ -33,6 +34,7 @@ import {
   CLEAR_CMD,
   CLEAR_FINAL_CMD,
   CLEAN_CMD,
+  CLEAN_REVIEW_CMD,
   ENHANCE_LIVE,
   SEND_TRIGGER,
   ACTION_TRIGGER,
@@ -98,6 +100,15 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private _awaitingEnhancementDecision = false;
   private _originalBufferBeforeEnhance = '';
   private _enhanceTriggerFired = false;
+  /**
+   * Snapshot of promptBuffer captured right after a successful enhance/clean.
+   * Auto-clean before send is skipped iff promptBuffer === this snapshot
+   * (i.e. nothing was appended/cleared/restored since). Any divergence —
+   * new transcript chunks, a CLEAR, or a REJECT — naturally invalidates it.
+   */
+  private _lastCleanedSnapshot: string | null = null;
+  /** "clean up and review" was triggered — show preview before send. */
+  private _cleanReviewTriggerFired = false;
   private _deepgramTranscriber: DeepgramTranscriber | null = null;
   private _voiceActivationMonitor: VoiceActivationMonitor | null = null;
 
@@ -734,12 +745,49 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.send({ type: 'transcriptResult', text: '' });
       return;
     }
+    if (CLEAN_REVIEW_CMD.test(text) || CLEAN_REVIEW_CMD.test(accumulated)) {
+      this.log.appendLine('[VTP] Clean+review command (Deepgram) -- running preview cleanup.');
+      this.capture.kill();
+      void this.stopRecording();
+      void this.cleanAndReview();
+      return;
+    }
     if (CLEAN_CMD.test(text) || CLEAN_CMD.test(accumulated)) {
       this.log.appendLine('[VTP] Clean command (Deepgram) -- running cleanup pass.');
       this.capture.kill();
       void this.stopRecording();
       void this.cleanAndApply();
       return;
+    }
+  }
+
+  /**
+   * Clean + show preview. Same hybrid pipeline as the silent auto-clean,
+   * but emits the `elaborated` message so the panel renders the diff and
+   * waits for an approve/reject/regen voice or button decision.
+   */
+  private async cleanAndReview(): Promise<void> {
+    const text = (this.promptBuffer || this.interimTranscript).trim();
+    if (!text) {
+      this.send({ type: 'error', message: 'Nothing to clean — say something first.' });
+      return;
+    }
+    this.send({ type: 'elaborating' });
+    this._originalBufferBeforeEnhance = text;
+    const apiKey = (await this.secretManager.getApiKey().catch(() => null)) ?? null;
+    try {
+      const cleaner = new PromptCleaner(apiKey);
+      const { cleaned, usedLLM } = await cleaner.clean(text);
+      this.log.appendLine(`[VTP] Clean+review ${usedLLM ? '(regex+LLM)' : '(regex)'} — ${text.length}→${cleaned.length} chars.`);
+      this.promptBuffer = cleaned;
+      this._lastCleanedSnapshot = cleaned;
+      this.interimTranscript = '';
+      this._awaitingEnhancementDecision = true;
+      this.send({ type: 'elaborated', prompt: cleaned, original: text });
+      void this.startRecording();
+    } catch (err) {
+      this._awaitingEnhancementDecision = false;
+      this.send({ type: 'error', message: `Cleanup failed: ${this.formatError(err)}` });
     }
   }
 
@@ -779,6 +827,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       }
       this.log.appendLine(`[VTP] Clean: done. "${cleaned}"`);
       this.promptBuffer = cleaned;
+      this._lastCleanedSnapshot = cleaned;
       this.interimTranscript = '';
       this.send({ type: 'transcriptResult', text: this.promptBuffer });
     } catch (err) {
@@ -1431,6 +1480,11 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (CLEAN_REVIEW_CMD.test(segment)) {
+      this.log.appendLine('[VTP] Voice command: clean + review transcript.');
+      void this.cleanAndReview();
+      return;
+    }
     if (CLEAN_CMD.test(segment)) {
       this.log.appendLine('[VTP] Voice command: clean transcript (Gemini mode).');
       void this.cleanAndApply();
@@ -1544,9 +1598,11 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private async onSend(prompt: string): Promise<void> {
-    this.log.appendLine(`[VTP] Manual send — injecting (${prompt.length} chars).`);
-    await this.chatInjector.inject(prompt);
+    const finalPrompt = await this.maybeAutoClean(prompt);
+    this.log.appendLine(`[VTP] Manual send — injecting (${finalPrompt.length} chars).`);
+    await this.chatInjector.inject(finalPrompt);
     this.promptBuffer = '';
+    this._lastCleanedSnapshot = null;
     this.send({ type: 'injected' });
     // Clear the lock so the next refresh re-detects and re-locks to the
     // conversation that is now newest (the one this window just sent to).
@@ -1555,15 +1611,39 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private async injectRaw(): Promise<void> {
-    const prompt = this.promptBuffer.trim();
-    this.log.appendLine(`[VTP] Injecting raw buffer (${prompt.length} chars).`);
-    await this.chatInjector.inject(prompt);
+    const finalPrompt = await this.maybeAutoClean(this.promptBuffer.trim());
+    this.log.appendLine(`[VTP] Injecting buffer (${finalPrompt.length} chars).`);
+    await this.chatInjector.inject(finalPrompt);
     this.promptBuffer = '';
     this.interimTranscript = '';
+    this._lastCleanedSnapshot = null;
     this.send({ type: 'injected' });
     // Clear the lock so the next refresh re-locks to whichever conversation
     // is now newest (the one this window just sent to).
     this._lockedConversationId = null;
+  }
+
+  /**
+   * Run hybrid auto-clean unless the buffer is already enhanced/cleaned.
+   * "Enhanced" means promptBuffer matches the last snapshot taken right after
+   * a successful elaborate/clean — i.e. nothing has been appended or restored
+   * since. Returns the (possibly cleaned) prompt.
+   */
+  private async maybeAutoClean(prompt: string): Promise<string> {
+    if (!prompt) return prompt;
+    if (this._lastCleanedSnapshot !== null && this._lastCleanedSnapshot === this.promptBuffer) {
+      this.log.appendLine('[VTP] Auto-clean skipped — buffer already enhanced.');
+      return prompt;
+    }
+    const apiKey = (await this.secretManager.getApiKey().catch(() => null)) ?? null;
+    const cleaner = new PromptCleaner(apiKey);
+    const { cleaned, usedLLM } = await cleaner.clean(prompt);
+    if (cleaned !== prompt) {
+      this.log.appendLine(`[VTP] Auto-clean ${usedLLM ? '(regex+LLM)' : '(regex)'} — ${prompt.length}→${cleaned.length} chars.`);
+    } else {
+      this.log.appendLine('[VTP] Auto-clean: no changes needed.');
+    }
+    return cleaned;
   }
 
   private async asyncCheckIntent(snapshot: string): Promise<void> {
@@ -1612,6 +1692,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         this.promptElaborator!.elaborate(this.promptBuffer, context, conversation),
       );
       this.promptBuffer = elaborated;
+      this._lastCleanedSnapshot = elaborated;
       this._awaitingEnhancementDecision = true;
       this.send({ type: 'elaborated', prompt: elaborated, original: this._originalBufferBeforeEnhance });
       this.log.appendLine('[VTP] Enhancement ready -- restarting mic for voice decision.');

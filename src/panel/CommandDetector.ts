@@ -16,7 +16,13 @@ export const CLEAR_CMD = /^[\s.,!?]*(clear(\s+(transcript|that|this|the\s+transc
 /** Clear (onFinalTranscript variant — slightly broader set). */
 export const CLEAR_FINAL_CMD = /^[\s.,!?]*(clear(\s+(the\s+)?(transcript|buffer|prompt|that|this))?|reset(\s+the)?\s+(transcript|buffer|prompt)|start\s+over)[\s.,!?]*$/i;
 
-/** Clean-up trigger: "clean it up", "scrub that", etc. */
+/**
+ * Clean-up + review trigger: cleans the buffer and shows a preview before
+ * sending. Checked BEFORE CLEAN_CMD because it's the more specific phrase.
+ */
+export const CLEAN_REVIEW_CMD = /\b(clean\s+(it\s+)?up\s+and\s+(review|show|preview)|clean\s+and\s+review|review\s+(the\s+)?clean(up)?|scrub\s+and\s+show)\b/i;
+
+/** Clean-up trigger: "clean it up", "scrub that", etc. (silent — no preview). */
 export const CLEAN_CMD = /\b(clean\s+it\s+up|clean\s+(this|that|the\s+prompt)\s+up|clean\s+up(\s+(the\s+)?(prompt|transcript|that|this))?|scrub\s+(that|this|it|the\s+prompt)|tidy\s+(this|that|it)\s+up)\b/i;
 
 /** Enhance trigger (live chunks). */

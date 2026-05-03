@@ -17,7 +17,7 @@ const os   = require('os');
 const crypto = require('crypto');
 
 // Bump in lockstep with src/integrations/claudeCode/patches.ts PATCH_SCHEMA_VERSION.
-const PATCH_SCHEMA_VERSION = 3;
+const PATCH_SCHEMA_VERSION = 5;
 
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
@@ -85,16 +85,27 @@ const PATCHES = {
       + 'notifyVTPSubmit(targetTitle){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_submit_only",targetTitle:targetTitle||""}})}',
   },
 
-  // Patch 2: extension.js — Manager class (the one with `this.allComms`).
-  // Add manager-level notifyVTPInject / notifyVTPSubmit that fan out to allComms.
+  // Patch 2: extension.js — Manager class. v5: filter by V.__vtp_panel.title
+  // with trailing-ellipsis stripping (tab.label is "Foo…", panel.title is "Foo bar").
   extJs_manager: {
     file: 'extJs',
     anchor: /notifyToggleDictation\(\)\{for\(let V of this\.allComms\)V\.notifyToggleDictation\(\)\}/,
-    appliedMarker: /for\(let V of this\.allComms\)V\.notifyVTPInject\(text,submit,targetTitle\)/,
+    appliedMarker: /__vtpCleanTitle/,
     replacement: (m) =>
       m[0]
-      + 'notifyVTPInject(text,submit,targetTitle){for(let V of this.allComms)V.notifyVTPInject(text,submit,targetTitle)}'
-      + 'notifyVTPSubmit(targetTitle){for(let V of this.allComms)V.notifyVTPSubmit(targetTitle)}',
+      + '__vtpCleanTitle(s){return(s||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim()}'
+      + 'notifyVTPInject(text,submit,targetTitle){var __dbg=[];for(let V of this.allComms){var pt=V.__vtp_panel&&V.__vtp_panel.title||"";if(targetTitle){var pl=this.__vtpCleanTitle(pt),tl=this.__vtpCleanTitle(targetTitle);if(!pl){__dbg.push("(no-title)");continue;}__dbg.push(pt);if(pl!==tl&&pl.indexOf(tl)===-1&&tl.indexOf(pl)===-1)continue;}V.notifyVTPInject(text,submit,targetTitle)}if(targetTitle)try{console.log("[VTP] dispatch lock=",targetTitle,"panels=",__dbg)}catch(e){}}'
+      + 'notifyVTPSubmit(targetTitle){for(let V of this.allComms){if(targetTitle){var pt=V.__vtp_panel&&V.__vtp_panel.title;if(!pt)continue;var pl=this.__vtpCleanTitle(pt),tl=this.__vtpCleanTitle(targetTitle);if(pl!==tl&&pl.indexOf(tl)===-1&&tl.indexOf(pl)===-1)continue;}V.notifyVTPSubmit(targetTitle)}}',
+  },
+
+  // Patch 2.5 (new in v4): tag each comm with its panel reference at the three
+  // allComms.add(...) sites. /g flag applies to all three occurrences.
+  // CLI's applyPatches forwards args as one array, so capture is at m[1].
+  extJs_panelTag: {
+    file: 'extJs',
+    anchor: /this\.allComms\.add\((\w+)\)/g,
+    appliedMarker: /\.__vtp_panel=V,this\.allComms\.add/,
+    replacement: (m) => m[1] + '.__vtp_panel=V,this.allComms.add(' + m[1] + ')',
   },
 
   // Patch 3: extension.js — register commands on activation. Sibling to toggleDictation.
@@ -115,16 +126,16 @@ const PATCHES = {
   },
 
   // Patch 4: webview/index.js — add vtp_inject_prompt + vtp_submit_only cases to
-  // the handleRequestInner switch. v3: case-insensitive partial title match
-  // (handles document.title vs tab.label format mismatches) + diagnostic log.
+  // the handleRequestInner switch. v5: permissive match with ellipsis strip
+  // (extension-side filter is the real gate; this is belt-and-suspenders).
   wvJs_handler: {
     file: 'wvJs',
     anchor: /case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
-    appliedMarker: /case"vtp_inject_prompt":[\s\S]*vtpTitleMatch/,
+    appliedMarker: /vtpStripMatch/,
     replacement: (m) =>
       m[0]
-      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";var _dt=document.title||"";var vtpTitleMatch=function(d,t){if(!t)return true;if(!d)return false;d=d.toLowerCase();t=t.toLowerCase();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};console.log("[VTP] inject req — title=",_dt,"lock=",_t,"match=",vtpTitleMatch(_dt,_t));if(!vtpTitleMatch(_dt,_t)){break}window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
-      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";var _dt2=document.title||"";var vtpTitleMatch2=function(d,t){if(!t)return true;if(!d)return false;d=d.toLowerCase();t=t.toLowerCase();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpTitleMatch2(_dt2,_t2)){console.log("[VTP] skip submit (title mismatch)",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
+      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";var _dt=document.title||"";console.log("[VTP] inject req — title=",_dt,"lock=",_t);var vtpStripMatch=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch(_dt,_t))break;window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
+      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";var _dt2=document.title||"";var vtpStripMatch2=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch2(_dt2,_t2)){console.log("[VTP] skip submit",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
   },
 
   // Patch 5: webview/index.js — prepend the runtime helper at the very top.

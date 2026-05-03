@@ -18,8 +18,10 @@ import * as crypto from 'crypto';
 // version trigger an auto-restore + re-apply on activation.
 //   v1 — original PoC (no targetTitle filtering)
 //   v2 — targetTitle strict equality filter for per-conversation lock
-//   v3 — case-insensitive partial title match + sidebar silent-skip + title diag log
-export const PATCH_SCHEMA_VERSION = 3;
+//   v3 — case-insensitive partial title match (failed: webview document.title is empty)
+//   v4 — extension-side filtering via panel.title (each comm tagged with __vtp_panel)
+//   v5 — strip trailing "…" / "..." (tab.label is truncated; panel.title isn't)
+export const PATCH_SCHEMA_VERSION = 5;
 
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
@@ -364,8 +366,8 @@ interface RegexPatch {
   file: 'extJs' | 'wvJs';
   anchor: RegExp;
   appliedMarker: RegExp;
-  /** Build the replacement given the matched anchor text. */
-  replacement: (matchedAnchor: string) => string;
+  /** Build the replacement given the matched anchor text + any regex capture groups. */
+  replacement: (matchedAnchor: string, ...captures: string[]) => string;
 }
 
 interface JsonPatch { json: true; }
@@ -386,11 +388,28 @@ export const PATCHES: Record<string, Patch> = {
   extJs_manager: {
     file: 'extJs',
     anchor: /notifyToggleDictation\(\)\{for\(let V of this\.allComms\)V\.notifyToggleDictation\(\)\}/,
-    appliedMarker: /for\(let V of this\.allComms\)V\.notifyVTPInject\(text,submit,targetTitle\)/,
+    // v5: filter by V.__vtp_panel.title with trailing-ellipsis stripping
+    // (tab.label gets truncated to "Foo…" but panel.title is the full string,
+    // so naive substring match fails because "…" isn't in the full string).
+    // Also logs candidate panels to aid debugging if no match fires.
+    appliedMarker: /__vtpCleanTitle/,
     replacement: (m) =>
       m
-      + 'notifyVTPInject(text,submit,targetTitle){for(let V of this.allComms)V.notifyVTPInject(text,submit,targetTitle)}'
-      + 'notifyVTPSubmit(targetTitle){for(let V of this.allComms)V.notifyVTPSubmit(targetTitle)}',
+      + '__vtpCleanTitle(s){return(s||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim()}'
+      + 'notifyVTPInject(text,submit,targetTitle){var __dbg=[];for(let V of this.allComms){var pt=V.__vtp_panel&&V.__vtp_panel.title||"";if(targetTitle){var pl=this.__vtpCleanTitle(pt),tl=this.__vtpCleanTitle(targetTitle);if(!pl){__dbg.push("(no-title)");continue;}__dbg.push(pt);if(pl!==tl&&pl.indexOf(tl)===-1&&tl.indexOf(pl)===-1)continue;}V.notifyVTPInject(text,submit,targetTitle)}if(targetTitle)try{console.log("[VTP] dispatch lock=",targetTitle,"panels=",__dbg)}catch(e){}}'
+      + 'notifyVTPSubmit(targetTitle){for(let V of this.allComms){if(targetTitle){var pt=V.__vtp_panel&&V.__vtp_panel.title;if(!pt)continue;var pl=this.__vtpCleanTitle(pt),tl=this.__vtpCleanTitle(targetTitle);if(pl!==tl&&pl.indexOf(tl)===-1&&tl.indexOf(pl)===-1)continue;}V.notifyVTPSubmit(targetTitle)}}',
+  },
+
+  // Patch (new in v4): tag each comm with its panel reference at the three
+  // allComms.add(...) call sites so the manager can filter by panel.title.
+  // Each site uses a different comm var name (N, Z, N) but always V for the panel,
+  // so we capture the comm name and prepend "<comm>.__vtp_panel=V,".
+  // The /g flag patches all three occurrences in one pass.
+  extJs_panelTag: {
+    file: 'extJs',
+    anchor: /this\.allComms\.add\((\w+)\)/g,
+    appliedMarker: /\.__vtp_panel=V,this\.allComms\.add/,
+    replacement: (m, commVar) => `${commVar}.__vtp_panel=V,this.allComms.add(${commVar})`,
   },
   extJs_commands: {
     file: 'extJs',
@@ -410,14 +429,14 @@ export const PATCHES: Record<string, Patch> = {
   wvJs_handler: {
     file: 'wvJs',
     anchor: /case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
-    appliedMarker: /case"vtp_inject_prompt":[\s\S]*vtpTitleMatch/,
+    // v5: webview filter stays permissive (real filter is extension-side).
+    // If Claude ever populates document.title, the strip helper compares the
+    // truncated form vs the full form correctly.
+    appliedMarker: /vtpStripMatch/,
     replacement: (m) =>
       m
-      // Helper: case-insensitive partial match — returns true if either string contains the other
-      // (handles cases where document.title is e.g. "Claude Code — Foo" but tab label is "Foo").
-      // Defined inline so it lives in the request-handler scope without a separate patch site.
-      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";var _dt=document.title||"";var vtpTitleMatch=function(d,t){if(!t)return true;if(!d)return false;d=d.toLowerCase();t=t.toLowerCase();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};console.log("[VTP] inject req — title=",_dt,"lock=",_t,"match=",vtpTitleMatch(_dt,_t));if(!vtpTitleMatch(_dt,_t)){break}window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
-      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";var _dt2=document.title||"";var vtpTitleMatch2=function(d,t){if(!t)return true;if(!d)return false;d=d.toLowerCase();t=t.toLowerCase();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpTitleMatch2(_dt2,_t2)){console.log("[VTP] skip submit (title mismatch)",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
+      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";var _dt=document.title||"";console.log("[VTP] inject req — title=",_dt,"lock=",_t);var vtpStripMatch=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch(_dt,_t))break;window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
+      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";var _dt2=document.title||"";var vtpStripMatch2=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch2(_dt2,_t2)){console.log("[VTP] skip submit",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
   },
   wvJs_helper: {
     file: 'wvJs',
@@ -456,7 +475,13 @@ export function applyPatches(files: ExtensionFiles): {
     const status = patchStatus(content, rx);
     if (status === 'applied') { results.push({ name, status: 'already-applied' }); continue; }
     if (status === 'broken')  { results.push({ name, status: 'anchor-not-found' }); continue; }
-    const updated = content.replace(rx.anchor, (matched: string) => rx.replacement(matched));
+    // Forward any capture groups from the regex to the replacement function so
+    // patches that need to know the matched comm var name (etc.) can use them.
+    // String.replace passes (match, p1, p2, …, offset, source) to the callback.
+    const updated = content.replace(rx.anchor, function (matched: string, ...args: any[]) {
+      const captures = args.slice(0, -2) as string[];
+      return rx.replacement(matched, ...captures);
+    });
     if (updated === content) { results.push({ name, status: 'replace-noop' }); continue; }
     if (rx.file === 'extJs') extJs = updated;
     else wvJs = updated;
