@@ -2,7 +2,7 @@
     "name": "vtp-voice-prompt",
     "displayName": "STP — Speech to Prompt",
     "description": "STP (also known as VTP — Voice to Prompt) — hands-free voice assistant for Claude Code and Antigravity. Wake it with a phrase, dictate the prompt, send by voice. Auto-cleans filler words, optional Gemini enhancement, per-chat lock, focus-independent injection.",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "icon": "media/icon.png",
     "publisher": "nizzynas",
     "license": "MIT",
