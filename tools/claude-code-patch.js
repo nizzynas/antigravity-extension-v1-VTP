@@ -17,7 +17,7 @@ const os   = require('os');
 const crypto = require('crypto');
 
 // Bump in lockstep with src/integrations/claudeCode/patches.ts PATCH_SCHEMA_VERSION.
-const PATCH_SCHEMA_VERSION = 5;
+const PATCH_SCHEMA_VERSION = 6;
 
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
@@ -109,19 +109,23 @@ const PATCHES = {
   },
 
   // Patch 3: extension.js — register commands on activation. Sibling to toggleDictation.
+  // v6 adds claude-code.getPanelTitlesVTP for full-title lock picker.
   extJs_commands: {
     file: 'extJs',
     anchor: /(V\.subscriptions\.push\(I4\.commands\.registerCommand\("claude-vscode\.toggleDictation",\(\)=>\{D\.notifyToggleDictation\(\)\}\)\);)/,
-    appliedMarker: /claude-code\.injectPromptVTP.*targetTitle/,
+    appliedMarker: /claude-code\.getPanelTitlesVTP/,
     replacement: (m) =>
       m[0]
       + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.injectPromptVTP",async(text,submit,targetTitle)=>{'
       +   'if(!text||typeof text!=="string"){text=await I4.window.showInputBox({prompt:"VTP — prompt to inject into Claude Code",ignoreFocusOut:true});if(!text)return;}'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle.slice(0,30)+"\\"":""));}catch(e){}'
+      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));}catch(e){}'
       +   'try{D.notifyVTPInject(text,submit!==false,targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] dispatch threw: "+e.message);}'
       + '}));'
       + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.submitVTP",(targetTitle)=>{'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle.slice(0,30)+"\\"":""));D.notifyVTPSubmit(targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
+      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));D.notifyVTPSubmit(targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
+      + '}));'
+      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.getPanelTitlesVTP",()=>{'
+      +   'try{return [...D.allComms].map(function(c){return c.__vtp_panel&&c.__vtp_panel.title||""}).filter(Boolean)}catch(e){return []}'
       + '}));',
   },
 

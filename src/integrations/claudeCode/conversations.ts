@@ -35,10 +35,16 @@ function stripEllipsis(s: string): string {
 /**
  * Returns all open Claude Code conversation tabs (newest active first).
  * Empty array if none open.
+ *
+ * Prefers titles read from `claude-code.getPanelTitlesVTP` (the patched
+ * command exposes panel.title directly — full, untruncated). Falls back to
+ * VS Code's `tab.label` (which is truncated to ~24 chars by the tab UI) if
+ * the command isn't registered yet (patch not applied / Claude not active).
  */
-export function listClaudeConversations(): ClaudeConversation[] {
-  const out: ClaudeConversation[] = [];
-  const seen = new Set<string>();
+export async function listClaudeConversations(): Promise<ClaudeConversation[]> {
+  // Build a map of title → isActive from tab.label first so we know which
+  // tabs are currently focused — getPanelTitlesVTP doesn't expose that.
+  const tabInfo = new Map<string, boolean>();
   for (const group of vscode.window.tabGroups.all) {
     for (const tab of group.tabs) {
       const input: any = tab.input;
@@ -48,12 +54,47 @@ export function listClaudeConversations(): ClaudeConversation[] {
         : false;
       if (!isClaude) continue;
       const label = stripEllipsis(tab.label || '');
-      if (!label || seen.has(label)) continue;
-      seen.add(label);
-      out.push({ title: label, isActive: tab.isActive });
+      if (!label) continue;
+      // If multiple tabs have the same label, OR the active flags.
+      tabInfo.set(label, (tabInfo.get(label) || false) || tab.isActive);
     }
   }
-  // Active tab first; then by label for stable ordering.
+
+  // Pull full titles from the patched Claude manager.
+  let fullTitles: string[] = [];
+  try {
+    const result = await vscode.commands.executeCommand<string[]>('claude-code.getPanelTitlesVTP');
+    if (Array.isArray(result)) fullTitles = result.filter((t): t is string => typeof t === 'string' && t.length > 0);
+  } catch {
+    // Patch not active — fall back to tab.label only.
+  }
+
+  const out: ClaudeConversation[] = [];
+  const seen = new Set<string>();
+
+  if (fullTitles.length > 0) {
+    // Map each full title to its active flag by finding the tab whose
+    // (truncated) label is a prefix of the full title.
+    for (const full of fullTitles) {
+      if (seen.has(full)) continue;
+      seen.add(full);
+      let isActive = false;
+      for (const [tabLabel, tabActive] of tabInfo) {
+        if (full === tabLabel || full.startsWith(tabLabel) || tabLabel.startsWith(full)) {
+          isActive = isActive || tabActive;
+        }
+      }
+      out.push({ title: full, isActive });
+    }
+  } else {
+    // Fallback path: use the (truncated) tab labels as titles.
+    for (const [label, isActive] of tabInfo) {
+      if (seen.has(label)) continue;
+      seen.add(label);
+      out.push({ title: label, isActive });
+    }
+  }
+
   out.sort((a, b) => {
     if (a.isActive !== b.isActive) return a.isActive ? -1 : 1;
     return a.title.localeCompare(b.title);
@@ -79,7 +120,7 @@ export async function setLockedTitle(title: string): Promise<void> {
  * as the lock target. Returns the chosen title (or null if cancelled).
  */
 export async function pickAndLockConversation(): Promise<string | null> {
-  const convs = listClaudeConversations();
+  const convs = await listClaudeConversations();
   const current = getLockedTitle();
 
   if (convs.length === 0) {

@@ -155,7 +155,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('vtp.listClaudeConversations', async () => {
-      const convs = listClaudeConversations();
+      const convs = await listClaudeConversations();
       if (convs.length === 0) {
         vscode.window.showInformationMessage('VTP: No Claude Code conversation tabs are open.');
         return;
