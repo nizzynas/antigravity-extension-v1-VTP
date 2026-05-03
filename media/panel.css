@@ -230,6 +230,27 @@ button.context-card:focus-visible {
   outline-offset: 2px;
 }
 
+/* Claude Code variants — orange accent matches the → CC target button.
+ * Unlocked: dim/outline (prompt user to pick). Locked: filled accent. */
+button.context-card.context-claude {
+  background: rgba(217, 119, 87, 0.06);
+  border-color: rgba(217, 119, 87, 0.30);
+}
+button.context-card.context-claude:hover {
+  background: rgba(217, 119, 87, 0.10);
+  border-color: rgba(217, 119, 87, 0.55);
+}
+button.context-card.context-claude.context-locked {
+  background: rgba(217, 119, 87, 0.14);
+  border-color: rgba(217, 119, 87, 0.65);
+}
+button.context-card.context-claude.context-locked:hover {
+  background: rgba(217, 119, 87, 0.22);
+}
+button.context-card.context-claude.context-locked .context-workspace {
+  color: rgba(217, 119, 87, 1);
+}
+
 .context-icon { font-size: 13px; margin-top: 1px; flex-shrink: 0; }
 
 .context-info {

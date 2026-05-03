@@ -67,9 +67,11 @@
       </div>
     </header>
 
-    <!-- Context badge — click to add extra conversation context -->
+    <!-- Context badge — adapts based on injection target.
+         target=antigravity: shows workspace + Antigravity chat, click adds extra context.
+         target=claude-code: shows Claude lock state, click opens Claude conversation picker. -->
     <button id="btn-context" class="context-card" title="Click to add extra conversation context">
-      <span class="context-icon">📂</span>
+      <span id="context-icon" class="context-icon">📂</span>
       <div class="context-info">
         <span id="context-workspace" class="context-workspace">Detecting...</span>
         <span id="context-conv" class="context-conv">—</span>

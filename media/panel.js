@@ -16,6 +16,7 @@
   const contextWorkspace = document.getElementById('context-workspace');
   const contextConv      = document.getElementById('context-conv');
   const contextPin       = document.getElementById('context-pin');
+  const contextIcon      = document.getElementById('context-icon');
   const btnContext       = document.getElementById('btn-context');
   const transcriptBox    = document.getElementById('transcript-box');
   const btnRecord        = document.getElementById('btn-record');
@@ -80,6 +81,12 @@
   let deepgramActive   = false;
   let activeEngine     = 'gemini';        // 'gemini' | 'deepgram'
   let hotkeyCombo      = 'Ctrl+Shift+Space'; // updated by hotkeyStatus
+  // Target state — drives the context card mode (Antigravity vs Claude Code).
+  let currentTarget    = 'antigravity';   // 'antigravity' | 'claude-code'
+  let lockedTitle      = '';              // Claude conversation lock target (empty = fan-to-all)
+  // Cached Antigravity context payload — re-applied to the card whenever we
+  // switch back from Claude target so we don't lose state.
+  let cachedAg = { workspaceName: '', conversationTitle: '', pinned: false, extrasCount: 0 };
   let isReviewing      = false;
   let savedEnhanced    = '';
   let committedText    = '';
@@ -385,30 +392,28 @@
         break;
 
       case 'targetState':
+        currentTarget = (msg.target === 'claude-code') ? 'claude-code' : 'antigravity';
+        lockedTitle   = msg.lockedTitle || '';
         if (btnTarget && btnTargetLabel) {
-          var isClaude = msg.target === 'claude-code';
+          var isClaude = currentTarget === 'claude-code';
           btnTargetLabel.textContent = isClaude ? '→ CC' : '→ AG';
           btnTarget.classList.toggle('target-claude', isClaude);
           btnTarget.classList.toggle('target-antigravity', !isClaude);
-          var lockTxt = msg.lockedTitle ? ' 🔒 ' + msg.lockedTitle.slice(0, 20) : '';
           btnTarget.title = isClaude
-            ? 'Target: Claude Code' + lockTxt + ' — click to switch, shift-click to lock conversation'
-            : 'Target: Antigravity — click to switch';
+            ? 'Target: Claude Code — click to switch to Antigravity'
+            : 'Target: Antigravity — click to switch to Claude Code';
         }
+        renderContextCard();
         break;
 
       case 'contextUpdate':
-        contextWorkspace.textContent = msg.workspaceName || '—';
-        contextConv.textContent      = msg.conversationTitle || '—';
-        if (msg.pinned) {
-          contextPin.classList.remove('hidden');
-          contextPin.textContent = msg.extrasCount ? `+${msg.extrasCount}` : '📌';
-          btnContext.title = `Extra context active — click to manage`;
-        } else {
-          contextPin.classList.add('hidden');
-          contextPin.textContent = '📌';
-          btnContext.title = 'Click to add extra conversation context';
-        }
+        cachedAg = {
+          workspaceName:     msg.workspaceName     || '',
+          conversationTitle: msg.conversationTitle || '',
+          pinned:            !!msg.pinned,
+          extrasCount:       msg.extrasCount       || 0,
+        };
+        renderContextCard();
         break;
 
       case 'hotkeyStatus':
@@ -541,8 +546,53 @@
 
   btnApiKey.addEventListener('click',   () => post({ type: 'openSettings' }));
   btnInfo.addEventListener('click',     () => post({ type: 'showInfo' }));
-  btnContext.addEventListener('click',  () => post({ type: 'selectContext' }));
+  // Context card — dispatches based on current target. AG opens the Antigravity
+  // context picker; Claude Code opens the conversation lock picker.
+  btnContext.addEventListener('click',  () => {
+    if (currentTarget === 'claude-code') {
+      post({ type: 'lockClaudeConversation' });
+    } else {
+      post({ type: 'selectContext' });
+    }
+  });
   btnDeepgram.addEventListener('click', () => post({ type: 'manageDeepgramKey' }));
+
+  // ─── Context card render ──────────────────────────────────────────────────
+  // Renders the card based on `currentTarget` + cached payloads. Called from
+  // the `targetState` and `contextUpdate` message handlers.
+  function renderContextCard() {
+    if (currentTarget === 'claude-code') {
+      contextIcon.textContent = '🔒';
+      btnContext.classList.add('context-claude');
+      contextPin.classList.add('hidden'); // pin is Antigravity-only
+      if (lockedTitle) {
+        contextWorkspace.textContent = 'Locked to:';
+        contextConv.textContent      = lockedTitle;
+        btnContext.classList.add('context-locked');
+        btnContext.title = 'Locked to "' + lockedTitle + '" — click to change or unlock';
+      } else {
+        contextWorkspace.textContent = 'No chat locked';
+        contextConv.textContent      = 'Click to pick a Claude chat';
+        btnContext.classList.remove('context-locked');
+        btnContext.title = 'Click to pick which Claude Code chat receives prompts';
+      }
+    } else {
+      // Antigravity (existing behaviour)
+      contextIcon.textContent = '📂';
+      btnContext.classList.remove('context-claude', 'context-locked');
+      contextWorkspace.textContent = cachedAg.workspaceName     || '—';
+      contextConv.textContent      = cachedAg.conversationTitle || '—';
+      if (cachedAg.pinned) {
+        contextPin.classList.remove('hidden');
+        contextPin.textContent = cachedAg.extrasCount ? ('+' + cachedAg.extrasCount) : '📌';
+        btnContext.title = 'Extra context active — click to manage';
+      } else {
+        contextPin.classList.add('hidden');
+        contextPin.textContent = '📌';
+        btnContext.title = 'Click to add extra conversation context';
+      }
+    }
+  }
 
   // ─── Engine picker ─────────────────────────────────────────────────────────
   function updateEngineButton() {
@@ -594,19 +644,11 @@
     post({ type: 'openKeybindings' });
   });
 
-  // → Target button — short click switches Antigravity ↔ Claude Code,
-  // long-press / shift-click opens the Claude conversation lock picker.
+  // → Target button — single-purpose: switch between Antigravity and Claude Code.
+  // Locking a Claude conversation is done from the context card below the header.
   if (btnTarget) {
-    btnTarget.addEventListener('click', (ev) => {
-      if (ev.shiftKey) {
-        post({ type: 'lockClaudeConversation' });
-      } else {
-        post({ type: 'switchInjectionTarget' });
-      }
-    });
-    btnTarget.addEventListener('contextmenu', (ev) => {
-      ev.preventDefault();
-      post({ type: 'lockClaudeConversation' });
+    btnTarget.addEventListener('click', () => {
+      post({ type: 'switchInjectionTarget' });
     });
   }
 
