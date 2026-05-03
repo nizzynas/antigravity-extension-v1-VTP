@@ -17,8 +17,9 @@ import * as crypto from 'crypto';
 // Bump whenever the patch shape changes. Old markers with a different schema
 // version trigger an auto-restore + re-apply on activation.
 //   v1 — original PoC (no targetTitle filtering)
-//   v2 — targetTitle filtering for per-conversation lock
-export const PATCH_SCHEMA_VERSION = 2;
+//   v2 — targetTitle strict equality filter for per-conversation lock
+//   v3 — case-insensitive partial title match + sidebar silent-skip + title diag log
+export const PATCH_SCHEMA_VERSION = 3;
 
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
@@ -263,11 +264,19 @@ export const VTP_RUNTIME_HELPER = `
   }
 
   window.__vtp_inject = function(text, submit) {
-    try { console.log('[VTP] __vtp_inject called', String(text||'').slice(0,80), 'submit=', submit); } catch(e){}
+    try { console.log('[VTP] __vtp_inject called', String(text||'').slice(0,80), 'submit=', submit, 'title=', document.title); } catch(e){}
     var c = vtpFindComposer();
     if (!c) {
       var d = window.__vtp_lastDiag || {tally:{}};
       var t = d.tally || {};
+      var totalCandidates = (t.ta||0) + (t.ce||0) + (t.tb||0) + (t.hidden||0);
+      // Silently skip webviews with NO editable surface at all (e.g. Claude
+      // Code's sidebar session list — it receives the broadcast but cannot
+      // accept prompts and the user shouldn't see an error there).
+      if (totalCandidates === 0) {
+        try { console.log('[VTP] no editable surface, silent skip. title=', document.title); } catch(e){}
+        return false;
+      }
       var top0 = (d.top && d.top[0]) || null;
       var msg = 'inject failed: ta=' + (t.ta||0) + ' ce=' + (t.ce||0) + ' txbox=' + (t.tb||0)
               + ' mona=' + (t.monaco||0) + ' hidden=' + (t.hidden||0);
@@ -401,11 +410,14 @@ export const PATCHES: Record<string, Patch> = {
   wvJs_handler: {
     file: 'wvJs',
     anchor: /case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
-    appliedMarker: /case"vtp_inject_prompt":[^]*targetTitle/,
+    appliedMarker: /case"vtp_inject_prompt":[\s\S]*vtpTitleMatch/,
     replacement: (m) =>
       m
-      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";if(_t&&_t!==document.title){console.log("[VTP] skip inject (title mismatch)",document.title,"vs",_t);}else{window.__vtp_inject($.request.text,$.request.submit)}}catch(e){console.error("[VTP]",e)}break;'
-      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";if(_t2&&_t2!==document.title){console.log("[VTP] skip submit (title mismatch)");}else{window.__vtp_submit()}}catch(e){console.error("[VTP]",e)}break;',
+      // Helper: case-insensitive partial match — returns true if either string contains the other
+      // (handles cases where document.title is e.g. "Claude Code — Foo" but tab label is "Foo").
+      // Defined inline so it lives in the request-handler scope without a separate patch site.
+      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";var _dt=document.title||"";var vtpTitleMatch=function(d,t){if(!t)return true;if(!d)return false;d=d.toLowerCase();t=t.toLowerCase();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};console.log("[VTP] inject req — title=",_dt,"lock=",_t,"match=",vtpTitleMatch(_dt,_t));if(!vtpTitleMatch(_dt,_t)){break}window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
+      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";var _dt2=document.title||"";var vtpTitleMatch2=function(d,t){if(!t)return true;if(!d)return false;d=d.toLowerCase();t=t.toLowerCase();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpTitleMatch2(_dt2,_t2)){console.log("[VTP] skip submit (title mismatch)",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
   },
   wvJs_helper: {
     file: 'wvJs',

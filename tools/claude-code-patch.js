@@ -17,7 +17,7 @@ const os   = require('os');
 const crypto = require('crypto');
 
 // Bump in lockstep with src/integrations/claudeCode/patches.ts PATCH_SCHEMA_VERSION.
-const PATCH_SCHEMA_VERSION = 2;
+const PATCH_SCHEMA_VERSION = 3;
 
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
@@ -115,15 +115,16 @@ const PATCHES = {
   },
 
   // Patch 4: webview/index.js — add vtp_inject_prompt + vtp_submit_only cases to
-  // the handleRequestInner switch. v2: filter by targetTitle === document.title.
+  // the handleRequestInner switch. v3: case-insensitive partial title match
+  // (handles document.title vs tab.label format mismatches) + diagnostic log.
   wvJs_handler: {
     file: 'wvJs',
     anchor: /case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
-    appliedMarker: /case"vtp_inject_prompt":[\s\S]*targetTitle/,
+    appliedMarker: /case"vtp_inject_prompt":[\s\S]*vtpTitleMatch/,
     replacement: (m) =>
       m[0]
-      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";if(_t&&_t!==document.title){console.log("[VTP] skip inject (title mismatch)",document.title,"vs",_t);}else{window.__vtp_inject($.request.text,$.request.submit)}}catch(e){console.error("[VTP]",e)}break;'
-      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";if(_t2&&_t2!==document.title){console.log("[VTP] skip submit (title mismatch)");}else{window.__vtp_submit()}}catch(e){console.error("[VTP]",e)}break;',
+      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";var _dt=document.title||"";var vtpTitleMatch=function(d,t){if(!t)return true;if(!d)return false;d=d.toLowerCase();t=t.toLowerCase();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};console.log("[VTP] inject req — title=",_dt,"lock=",_t,"match=",vtpTitleMatch(_dt,_t));if(!vtpTitleMatch(_dt,_t)){break}window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
+      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";var _dt2=document.title||"";var vtpTitleMatch2=function(d,t){if(!t)return true;if(!d)return false;d=d.toLowerCase();t=t.toLowerCase();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpTitleMatch2(_dt2,_t2)){console.log("[VTP] skip submit (title mismatch)",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
   },
 
   // Patch 5: webview/index.js — prepend the runtime helper at the very top.
