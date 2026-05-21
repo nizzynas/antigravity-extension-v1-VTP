@@ -5,7 +5,9 @@
  * tools/ scripts are the user-facing CLI form, this is the extension-side
  * embedded form. If you change one, change the other.
  *
- * Tested against Claude Code 2.1.126 (anthropic.claude-code).
+ * Tested against Claude Code 2.1.126 and 2.1.138 (anthropic.claude-code).
+ * Anchors capture the minified variable names (which change between releases)
+ * so the replacements stay version-resilient.
  */
 
 import * as fs from 'fs';
@@ -22,7 +24,10 @@ import * as crypto from 'crypto';
 //   v4 — extension-side filtering via panel.title (each comm tagged with __vtp_panel)
 //   v5 — strip trailing "…" / "..." (tab.label is truncated; panel.title isn't)
 //   v6 — expose getPanelTitlesVTP so the lock picker uses full panel.title
-export const PATCH_SCHEMA_VERSION = 6;
+//   v7 — anchors capture minified var names (V/I4/D/he1 → z/E0/q/ve1 in 2.1.138)
+//        and panelTag now reads the actual panel var instead of hard-coding "V",
+//        which silently set __vtp_panel to a stale ref after the 2.1.138 rename
+export const PATCH_SCHEMA_VERSION = 7;
 
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
@@ -386,9 +391,11 @@ export const PATCHES: Record<string, Patch> = {
       + 'notifyVTPInject(text,submit,targetTitle){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_inject_prompt",text:text,submit:submit!==!1,targetTitle:targetTitle||""}})}'
       + 'notifyVTPSubmit(targetTitle){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_submit_only",targetTitle:targetTitle||""}})}',
   },
+  // Loop var name varies by minifier (V in 2.1.126, z in 2.1.138) — match either.
+  // The replacement's own loop var stays "V" since it's scoped inside the new method.
   extJs_manager: {
     file: 'extJs',
-    anchor: /notifyToggleDictation\(\)\{for\(let V of this\.allComms\)V\.notifyToggleDictation\(\)\}/,
+    anchor: /notifyToggleDictation\(\)\{for\(let (\w+) of this\.allComms\)\1\.notifyToggleDictation\(\)\}/,
     // v5: filter by V.__vtp_panel.title with trailing-ellipsis stripping
     // (tab.label gets truncated to "Foo…" but panel.title is the full string,
     // so naive substring match fails because "…" isn't in the full string).
@@ -403,31 +410,37 @@ export const PATCHES: Record<string, Patch> = {
 
   // Patch (new in v4): tag each comm with its panel reference at the three
   // allComms.add(...) call sites so the manager can filter by panel.title.
-  // Each site uses a different comm var name (N, Z, N) but always V for the panel,
-  // so we capture the comm name and prepend "<comm>.__vtp_panel=V,".
+  // Each site uses a different comm var name (O/H/O in 2.1.138; N/Z/N in 2.1.126)
+  // and the panel param renamed from V → z in 2.1.138 — so we capture BOTH and
+  // reach forward to "<panelVar>.webview.onDidReceiveMessage" to identify the
+  // panel var unambiguously. Previously the panel name was hard-coded "V", which
+  // silently broke when 2.1.138 renamed the parameter.
   // The /g flag patches all three occurrences in one pass.
   extJs_panelTag: {
     file: 'extJs',
-    anchor: /this\.allComms\.add\((\w+)\)/g,
-    appliedMarker: /\.__vtp_panel=V,this\.allComms\.add/,
-    replacement: (m, commVar) => `${commVar}.__vtp_panel=V,this.allComms.add(${commVar})`,
+    anchor: /this\.allComms\.add\((\w+)\)((?:,this\.broadcastSessionStates\(\))?,(\w+)\.webview\.onDidReceiveMessage)/g,
+    appliedMarker: /\.__vtp_panel=\w+,this\.allComms\.add/,
+    replacement: (_m, commVar, tail, panelVar) =>
+      `${commVar}.__vtp_panel=${panelVar},this.allComms.add(${commVar})${tail}`,
   },
+  // Captures three minified identifiers — subscriptions ctx, vscode-ns, manager —
+  // which differ between releases (V/I4/D in 2.1.126, z/E0/q in 2.1.138).
   extJs_commands: {
     file: 'extJs',
-    anchor: /(V\.subscriptions\.push\(I4\.commands\.registerCommand\("claude-vscode\.toggleDictation",\(\)=>\{D\.notifyToggleDictation\(\)\}\)\);)/,
+    anchor: /(\w+)\.subscriptions\.push\((\w+)\.commands\.registerCommand\("claude-vscode\.toggleDictation",\(\)=>\{(\w+)\.notifyToggleDictation\(\)\}\)\);/,
     appliedMarker: /claude-code\.getPanelTitlesVTP/,
-    replacement: (m) =>
+    replacement: (m, ctx, vsc, mgr) =>
       m
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.injectPromptVTP",async(text,submit,targetTitle)=>{'
-      +   'if(!text||typeof text!=="string"){text=await I4.window.showInputBox({prompt:"VTP — prompt to inject into Claude Code",ignoreFocusOut:true});if(!text)return;}'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));}catch(e){}'
-      +   'try{D.notifyVTPInject(text,submit!==false,targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] dispatch threw: "+e.message);}'
+      + ctx + '.subscriptions.push(' + vsc + '.commands.registerCommand("claude-code.injectPromptVTP",async(text,submit,targetTitle)=>{'
+      +   'if(!text||typeof text!=="string"){text=await ' + vsc + '.window.showInputBox({prompt:"VTP — prompt to inject into Claude Code",ignoreFocusOut:true});if(!text)return;}'
+      +   'try{var __n=(' + mgr + '&&' + mgr + '.allComms&&' + mgr + '.allComms.size)||0;' + vsc + '.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));}catch(e){}'
+      +   'try{' + mgr + '.notifyVTPInject(text,submit!==false,targetTitle);}catch(e){' + vsc + '.window.showErrorMessage("[VTP] dispatch threw: "+e.message);}'
       + '}));'
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.submitVTP",(targetTitle)=>{'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));D.notifyVTPSubmit(targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
+      + ctx + '.subscriptions.push(' + vsc + '.commands.registerCommand("claude-code.submitVTP",(targetTitle)=>{'
+      +   'try{var __n=(' + mgr + '&&' + mgr + '.allComms&&' + mgr + '.allComms.size)||0;' + vsc + '.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));' + mgr + '.notifyVTPSubmit(targetTitle);}catch(e){' + vsc + '.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
       + '}));'
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.getPanelTitlesVTP",()=>{'
-      +   'try{return [...D.allComms].map(function(c){return c.__vtp_panel&&c.__vtp_panel.title||""}).filter(Boolean)}catch(e){return []}'
+      + ctx + '.subscriptions.push(' + vsc + '.commands.registerCommand("claude-code.getPanelTitlesVTP",()=>{'
+      +   'try{return [...' + mgr + '.allComms].map(function(c){return c.__vtp_panel&&c.__vtp_panel.title||""}).filter(Boolean)}catch(e){return []}'
       + '}));',
   },
   wvJs_handler: {
@@ -442,9 +455,10 @@ export const PATCHES: Record<string, Patch> = {
       + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";var _dt=document.title||"";console.log("[VTP] inject req — title=",_dt,"lock=",_t);var vtpStripMatch=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch(_dt,_t))break;window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
       + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";var _dt2=document.title||"";var vtpStripMatch2=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch2(_dt2,_t2)){console.log("[VTP] skip submit",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
   },
+  // Identifier varies (he1 in 2.1.126, ve1 in 2.1.138); match any.
   wvJs_helper: {
     file: 'wvJs',
-    anchor: /^var he1=Object\.create;/,
+    anchor: /^var \w+=Object\.create;/,
     appliedMarker: /window\.__vtp_inject\s*=/,
     replacement: (m) => VTP_RUNTIME_HELPER + m,
   },

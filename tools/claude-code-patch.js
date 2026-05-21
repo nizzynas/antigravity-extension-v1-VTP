@@ -8,7 +8,9 @@
  *   - the regex-anchored patch pairs for extension.js, webview/index.js, package.json
  *   - the runtime helper injected into webview/index.js
  *
- * Tested against Claude Code 2.1.126.
+ * Tested against Claude Code 2.1.126 and 2.1.138. Anchors capture the minified
+ * variable names (which change between releases) so the replacements stay
+ * version-resilient.
  */
 
 const fs   = require('fs');
@@ -17,7 +19,7 @@ const os   = require('os');
 const crypto = require('crypto');
 
 // Bump in lockstep with src/integrations/claudeCode/patches.ts PATCH_SCHEMA_VERSION.
-const PATCH_SCHEMA_VERSION = 6;
+const PATCH_SCHEMA_VERSION = 7;
 
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
@@ -87,9 +89,11 @@ const PATCHES = {
 
   // Patch 2: extension.js — Manager class. v5: filter by V.__vtp_panel.title
   // with trailing-ellipsis stripping (tab.label is "Foo…", panel.title is "Foo bar").
+  // Loop var name varies by minifier (V in 2.1.126, z in 2.1.138) — match either.
+  // The replacement's own loop var stays "V" since it's scoped inside the new method.
   extJs_manager: {
     file: 'extJs',
-    anchor: /notifyToggleDictation\(\)\{for\(let V of this\.allComms\)V\.notifyToggleDictation\(\)\}/,
+    anchor: /notifyToggleDictation\(\)\{for\(let (\w+) of this\.allComms\)\1\.notifyToggleDictation\(\)\}/,
     appliedMarker: /__vtpCleanTitle/,
     replacement: (m) =>
       m[0]
@@ -100,33 +104,41 @@ const PATCHES = {
 
   // Patch 2.5 (new in v4): tag each comm with its panel reference at the three
   // allComms.add(...) sites. /g flag applies to all three occurrences.
-  // CLI's applyPatches forwards args as one array, so capture is at m[1].
+  // CLI's applyPatches forwards args as one array, so captures are at m[1..].
+  // The anchor reaches forward to "<panelVar>.webview.onDidReceiveMessage" so we
+  // can capture the panel variable name (V in 2.1.126, z in 2.1.138). Without
+  // this, the inserted "<comm>.__vtp_panel=V" would silently reference an
+  // out-of-scope V in newer builds, breaking title-based panel routing.
   extJs_panelTag: {
     file: 'extJs',
-    anchor: /this\.allComms\.add\((\w+)\)/g,
-    appliedMarker: /\.__vtp_panel=V,this\.allComms\.add/,
-    replacement: (m) => m[1] + '.__vtp_panel=V,this.allComms.add(' + m[1] + ')',
+    anchor: /this\.allComms\.add\((\w+)\)((?:,this\.broadcastSessionStates\(\))?,(\w+)\.webview\.onDidReceiveMessage)/g,
+    appliedMarker: /\.__vtp_panel=\w+,this\.allComms\.add/,
+    replacement: (m) => m[1] + '.__vtp_panel=' + m[3] + ',this.allComms.add(' + m[1] + ')' + m[2],
   },
 
   // Patch 3: extension.js — register commands on activation. Sibling to toggleDictation.
   // v6 adds claude-code.getPanelTitlesVTP for full-title lock picker.
+  // Captures three minified identifiers — context (m[1]), vscode-ns (m[2]), manager (m[3]) —
+  // which differ between releases (V/I4/D in 2.1.126, z/E0/q in 2.1.138).
   extJs_commands: {
     file: 'extJs',
-    anchor: /(V\.subscriptions\.push\(I4\.commands\.registerCommand\("claude-vscode\.toggleDictation",\(\)=>\{D\.notifyToggleDictation\(\)\}\)\);)/,
+    anchor: /(\w+)\.subscriptions\.push\((\w+)\.commands\.registerCommand\("claude-vscode\.toggleDictation",\(\)=>\{(\w+)\.notifyToggleDictation\(\)\}\)\);/,
     appliedMarker: /claude-code\.getPanelTitlesVTP/,
-    replacement: (m) =>
-      m[0]
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.injectPromptVTP",async(text,submit,targetTitle)=>{'
-      +   'if(!text||typeof text!=="string"){text=await I4.window.showInputBox({prompt:"VTP — prompt to inject into Claude Code",ignoreFocusOut:true});if(!text)return;}'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));}catch(e){}'
-      +   'try{D.notifyVTPInject(text,submit!==false,targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] dispatch threw: "+e.message);}'
-      + '}));'
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.submitVTP",(targetTitle)=>{'
-      +   'try{var __n=(D&&D.allComms&&D.allComms.size)||0;I4.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));D.notifyVTPSubmit(targetTitle);}catch(e){I4.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
-      + '}));'
-      + 'V.subscriptions.push(I4.commands.registerCommand("claude-code.getPanelTitlesVTP",()=>{'
-      +   'try{return [...D.allComms].map(function(c){return c.__vtp_panel&&c.__vtp_panel.title||""}).filter(Boolean)}catch(e){return []}'
-      + '}));',
+    replacement: (m) => {
+      const ctx = m[1], vsc = m[2], mgr = m[3];
+      return m[0]
+        + ctx + '.subscriptions.push(' + vsc + '.commands.registerCommand("claude-code.injectPromptVTP",async(text,submit,targetTitle)=>{'
+        +   'if(!text||typeof text!=="string"){text=await ' + vsc + '.window.showInputBox({prompt:"VTP — prompt to inject into Claude Code",ignoreFocusOut:true});if(!text)return;}'
+        +   'try{var __n=(' + mgr + '&&' + mgr + '.allComms&&' + mgr + '.allComms.size)||0;' + vsc + '.window.showInformationMessage("[VTP] dispatched "+text.length+" chars → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));}catch(e){}'
+        +   'try{' + mgr + '.notifyVTPInject(text,submit!==false,targetTitle);}catch(e){' + vsc + '.window.showErrorMessage("[VTP] dispatch threw: "+e.message);}'
+        + '}));'
+        + ctx + '.subscriptions.push(' + vsc + '.commands.registerCommand("claude-code.submitVTP",(targetTitle)=>{'
+        +   'try{var __n=(' + mgr + '&&' + mgr + '.allComms&&' + mgr + '.allComms.size)||0;' + vsc + '.window.showInformationMessage("[VTP] submit → "+__n+" webview(s)"+(targetTitle?" target=\\""+targetTitle+"\\"":""));' + mgr + '.notifyVTPSubmit(targetTitle);}catch(e){' + vsc + '.window.showErrorMessage("[VTP] submit threw: "+e.message);}'
+        + '}));'
+        + ctx + '.subscriptions.push(' + vsc + '.commands.registerCommand("claude-code.getPanelTitlesVTP",()=>{'
+        +   'try{return [...' + mgr + '.allComms].map(function(c){return c.__vtp_panel&&c.__vtp_panel.title||""}).filter(Boolean)}catch(e){return []}'
+        + '}));';
+    },
   },
 
   // Patch 4: webview/index.js — add vtp_inject_prompt + vtp_submit_only cases to
@@ -143,9 +155,10 @@ const PATCHES = {
   },
 
   // Patch 5: webview/index.js — prepend the runtime helper at the very top.
+  // Identifier varies (he1 in 2.1.126, ve1 in 2.1.138); match any.
   wvJs_helper: {
     file: 'wvJs',
-    anchor: /^var he1=Object\.create;/,
+    anchor: /^var \w+=Object\.create;/,
     appliedMarker: /window\.__vtp_inject\s*=/,
     replacement: (m) => VTP_RUNTIME_HELPER + m[0],
   },
