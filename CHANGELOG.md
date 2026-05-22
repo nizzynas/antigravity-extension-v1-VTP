@@ -4,6 +4,32 @@ All notable changes to STP — Speech to Prompt are documented here.
 
 ---
 
+## [1.1.1] — 2026-05-22
+### Added
+- **Auto-patch on activation** — `ensurePatched()` runs on extension startup and idempotently injects the VTP IPC bridge into Claude Code's `extension.js` / `webview/index.js`. Detects Claude Code version changes and re-applies cleanly. Originals are backed up under `.vtp-backups/` and a `.vtp-patched.json` marker records the schema version so stale patches trigger an auto-restore + re-apply.
+- **Webview runtime helper bundled in-extension** — `VTP_RUNTIME_HELPER` (composer finder, send-button finder, `__vtp_inject` / `__vtp_submit` / `__vtp_diag`) is now embedded in the extension itself instead of relying on the standalone CLI script.
+- **Patch schema bumped to v6** — `getPanelTitlesVTP` command surfaces full panel titles to the lock picker, fixing tab-label truncation mismatches.
+
+### Fixed
+- **Sidebar "inject failed" toast spam** — the Claude Code sidebar session list has no editable surface; it now silent-skips instead of toasting an error on every dispatch.
+- **Locked-chat substring mismatch** — both extension and webview sides strip trailing `…` / `...` and compare case-insensitively, so a tab labelled `"Migrate antigravity data…"` correctly matches the full panel title `"Migrate antigravity data and indexes"`.
+
+---
+
+## [1.1.0] — 2026-05-21
+### Added
+- **Claude Code as injection target** — new `vtp.injectionTarget` setting routes prompts into the Anthropic Claude Code extension instead of Antigravity. Switch via `VTP: Switch Injection Target` or the toggle in the panel.
+- **Hands-free injection into Claude Code** — runtime helper finds the composer (textarea / contenteditable / role=textbox), injects the transcribed prompt, and clicks send. Works regardless of which view has focus.
+- **Per-conversation lock** — `VTP: Lock Claude Conversation` pins prompts to a single chat by panel title. Other open Claude tabs in the same window are silently skipped. Empty lock = fan to all.
+- **Manual patch controls** — `VTP: (Re-)apply Claude Code Patch`, `VTP: Restore Claude Code (Unpatch)`, `VTP: Show Claude Code Patch Status` for explicit control.
+- **Deepgram enforcement for Claude Code target** — switching target to Claude Code automatically forces `transcriptionEngine` to `deepgram` (Gemini chunked is too slow for hands-free flow). Prompts for the Deepgram key if missing.
+
+### Changed
+- **Display name + description** — clarified that STP/VTP supports both Antigravity and Claude Code.
+- **Panel context card** — adapts to the active target; shows the locked Claude conversation when Claude Code is selected.
+
+---
+
 ## [1.0.1] — 2026-04-29
 ### Fixed
 - **Context panel hijacked by other windows** — each VTP panel now locks to its own conversation on first load. When a message is sent in a different VS Code window, the file-system watcher detects that the changed conversation ID doesn't match the lock and ignores it. Sending a prompt from the current window clears and re-acquires the lock so the panel always tracks the correct chat.
