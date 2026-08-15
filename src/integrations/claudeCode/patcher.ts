@@ -104,6 +104,40 @@ export function getStatus(): PatchStatus {
  *   - Marker for old version → re-apply, returns true.
  *   - First-time → apply + create backup, returns true.
  */
+/**
+ * One window patches at a time.
+ *
+ * An extension host runs per window, so ten editors open means ten copies of
+ * this, and they all wake up to the same new Claude Code at the same moment.
+ * Ten processes rewriting one extension.js is not ten times the work, it is a
+ * corrupted file — and the backup taken by the second one is a copy of what
+ * the first was halfway through writing.
+ *
+ * A file nobody else can create while it exists. Left behind by a crash it
+ * would block patching forever, so one older than a couple of minutes is
+ * treated as abandoned — no patch takes anywhere near that long.
+ */
+const LOCK_STALE_MS = 120_000;
+
+function takeLock(extDir: string, log: (m: string) => void): (() => void) | null {
+  const lock = path.join(extDir, '.vtp-patching');
+  try {
+    const age = Date.now() - fs.statSync(lock).mtimeMs;
+    if (age > LOCK_STALE_MS) {
+      log(`[VTP/claude-code] clearing a lock left behind ${Math.round(age / 1000)}s ago`);
+      fs.unlinkSync(lock);
+    }
+  } catch { /* no lock, which is the usual case */ }
+
+  try {
+    // wx fails if it is already there, which is the whole point.
+    fs.writeFileSync(lock, String(process.pid), { flag: 'wx' });
+  } catch {
+    return null;                     // another window is doing it
+  }
+  return () => { try { fs.unlinkSync(lock); } catch { /* gone */ } };
+}
+
 export async function ensurePatched(log?: (m: string) => void): Promise<boolean> {
   const status = getStatus();
   const _log = log ?? (() => {});
@@ -123,6 +157,14 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
     _log(`[VTP/claude-code] already patched (v${status.version}, schema v${PATCH_SCHEMA_VERSION})`);
     return false;
   }
+
+  // Past here the files get rewritten, so only one window may proceed.
+  const release = takeLock(status.extDir, _log);
+  if (!release) {
+    _log('[VTP/claude-code] another window is patching — leaving it to that one');
+    return false;
+  }
+  try {
 
   if (versionChanged) {
     _log(`[VTP/claude-code] Claude Code v${status.marker!.version} → v${status.version} — re-applying`);
@@ -190,6 +232,9 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
   fs.writeFileSync(f.marker, JSON.stringify(marker, null, 2));
   _log(`[VTP/claude-code] applied for v${version} (schema v${PATCH_SCHEMA_VERSION})`);
   return true;
+  } finally {
+    release();
+  }
 }
 
 /**

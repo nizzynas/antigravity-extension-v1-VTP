@@ -108,13 +108,30 @@ export class Inbox {
     if (this.busy.has(file)) return;
     this.busy.add(file);
 
+    // One window takes it, and the others do not.
+    //
+    // An extension host runs per window, so ten editors open means ten copies
+    // of this watching one folder. They all see the same file appear, all read
+    // it, and all put it in a chat — the note arrives several times, in
+    // several windows, and whichever deletes it first makes the rest look
+    // like failures. Renaming is the claim: on Windows it is atomic, so
+    // exactly one process succeeds and the losers stop here.
+    const base = file;
+    const mine = file + '.mine';
     try {
-      const handover = await this.read(file);
+      fs.renameSync(file, mine);
+    } catch {
+      this.busy.delete(file);
+      return;                       // someone else got there first
+    }
+
+    try {
+      const handover = await this.read(mine);
       if (!handover) return;
 
       const text = String(handover.text ?? '').trim();
       if (!text) {
-        this.answer(file, { ok: false, error: 'nothing to say' });
+        this.answer(base, { ok: false, error: 'nothing to say' });
         return;
       }
 
@@ -130,11 +147,11 @@ export class Inbox {
       const matched = target ? open.filter((t) => sameConversation(t, target)) : open;
 
       if (open.length === 0) {
-        this.answer(file, { ok: false, error: 'no Claude conversation is open in the editor', panels: open });
+        this.answer(base, { ok: false, error: 'no Claude conversation is open in the editor', panels: open });
         return;
       }
       if (matched.length === 0) {
-        this.answer(file, {
+        this.answer(base, {
           ok: false,
           error: `no open conversation matches "${target}"`,
           panels: open,
@@ -144,7 +161,7 @@ export class Inbox {
 
       await vscode.commands.executeCommand('claude-code.injectPromptVTP', text, submit, target);
       this.log(`[VTP inbox] handed over ${text.length} chars to ${matched.length} of ${open.length} conversation(s)${submit ? ', sent' : ''}`);
-      this.answer(file, {
+      this.answer(base, {
         ok: true,
         chars: text.length,
         submitted: submit,
@@ -155,14 +172,14 @@ export class Inbox {
       // full: the caller is another program and cannot see the IDE's messages.
       const why = String(e?.message ?? e);
       this.log(`[VTP inbox] ${name} failed: ${why}`);
-      this.answer(file, {
+      this.answer(base, {
         ok: false,
         error: /command .* not found/i.test(why)
           ? 'claude-code.injectPromptVTP is not registered — the Claude Code patch is not applied in this window'
           : why,
       });
     } finally {
-      try { fs.unlinkSync(file); } catch { /* already gone */ }
+      try { fs.unlinkSync(mine); } catch { /* already gone */ }
       this.busy.delete(file);
     }
   }
