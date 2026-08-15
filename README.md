@@ -84,9 +84,17 @@ Install from Open VSX / the marketplace, or `code --install-extension vtp-voice-
 
 ### 2. First run downloads the speech model
 
-The first time you open the STP panel it downloads a ~40 MB Vosk English model to the extension's local storage. You'll see a progress banner. After that it works fully offline — the model is cached and reused.
+The first time you open the STP panel it downloads a Vosk English model to the extension's local storage. You'll see a progress banner. After that it works fully offline — the model is cached and reused.
 
-> Want a different language or a larger, more accurate model? Point `vtp.voskModelUrl` at any [vosk-browser-compatible](https://github.com/ccoreilly/vosk-browser) `.tar.gz` model.
+**It is a 130 MB download and STP cannot hear you until it finishes.** That is the accurate model, and on a slow connection it is a long first run. If you would rather be talking in a minute, set `vtp.voskModelUrl` to the small one before you open the panel:
+
+```
+https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz
+```
+
+40 MB, noticeably less accurate on unusual words, and swappable later — changing the setting and running **VTP: Re-download Speech Model** fetches the other one.
+
+> Another language, or a different size? Point `vtp.voskModelUrl` at any [vosk-browser-compatible](https://github.com/ccoreilly/vosk-browser) `.tar.gz`, or an alphacephei `.zip` — those are converted on first run.
 
 ### 3. (Optional) Install Ollama for smart "enhance"
 
@@ -149,12 +157,32 @@ Anything running as you can hand a prompt to an open Claude conversation by drop
 | `vtp.wakePhrase` | `hey antigravity` | The phrase that starts recording |
 | `vtp.postSendMode` | `pause` | `pause` (idle after send) or `continuous` (keep listening) |
 | `vtp.enhancementModel` | `llama3.2` | Local Ollama model tag used for `enhance` |
-| `vtp.voskModelUrl` | small-en-us | URL of the Vosk `.tar.gz` model (downloaded once) |
+| `vtp.voskModelUrl` | en-us-0.22-lgraph (130 MB) | Speech model, downloaded once. Accepts a vosk-browser `.tar.gz` or an alphacephei `.zip`. Point it at `vosk-model-small-en-us-0.15.tar.gz` for a 40 MB one |
 | `vtp.contextDepth` | `20` | Recent conversation messages passed as context when enhancing |
 | `vtp.injectionTarget` | `antigravity` | Where prompts go: `antigravity` or `claude-code` |
 | `vtp.claudeCodeLockedTitle` | `""` | Tab label of the locked Claude Code conversation |
+| `vtp.voiceActivation.enabled` | `false` | Listen in the background and start recording on the wake phrase, with nothing to press |
+| `vtp.voiceActivation.wakePhrase` | `hey antigravity` | The phrase it listens for in the background. Short ones misfire; three syllables or more is steadier |
+| `vtp.inputGateDb` | `-45` | Anything quieter than this never reaches the recognizer. Raise it towards `-35` in a noisy room; lower it if quiet speech is being dropped |
+| `vtp.inputGainDb` | `0` | Extra microphone gain. Raise it if the input meter barely moves while you speak |
+| `vtp.vadMode` | `false` | Legacy always-on detection. Superseded by `vtp.voiceActivation.enabled` |
 
-Commands: **VTP: Open Panel**, **VTP: Toggle Recording**, **VTP: Re-download Speech Model**, **VTP: Check Claude Code Integration**, plus the Claude Code patch/lock commands.
+### Commands
+
+| Command | What it does |
+|---|---|
+| **VTP: Open Panel** | Shows the panel in the sidebar |
+| **VTP: Toggle Recording** | Starts or stops recording without touching the mouse |
+| **VTP: Switch Injection Target** | Antigravity or Claude Code |
+| **VTP: Re-download Speech Model** | Clears the cached model, so a new `vtp.voskModelUrl` takes effect |
+| **VTP: Open Debug Log** | The log file, when something needs explaining |
+| **VTP: Check Claude Code Integration** | Whether prompts can be delivered right now, and what is wrong if not |
+| **VTP: (Re-)apply Claude Code Patch** | Attaches the hook by hand. Normally automatic |
+| **VTP: Show Claude Code Patch Status** | Version and when it was patched |
+| **VTP: Restore Claude Code (Unpatch)** | Rolls Claude Code back to how it was |
+| **VTP: Lock Claude Conversation** | Pins prompts to one chat |
+| **VTP: Unlock Claude Conversation** | Back to whichever chats are open |
+| **VTP: List Open Claude Conversations** | What is open, and which one is locked |
 
 ---
 
