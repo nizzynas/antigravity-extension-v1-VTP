@@ -61,22 +61,31 @@ export type PanelMessage =
   | { type: 'selectContext' }
   /** Enhancement review decision: approve keeps enhanced, reject restores original, regenerate re-elaborates */
   | { type: 'enhancementDecision'; action: 'approve' | 'reject' | 'regenerate' }
-  /** User clicked the DG button to manage their optional Deepgram API key */
-  | { type: 'manageDeepgramKey' }
   /** User clicked the ⌨ KEY button — open VS Code keyboard shortcut editor for VTP */
   | { type: 'openKeybindings' }
   /** User clicked the target toggle button — open the target picker */
   | { type: 'switchInjectionTarget' }
   /** User wants to (re)lock the Claude Code conversation target */
   | { type: 'lockClaudeConversation' }
-  /** Onboarding completed — persist engine choice, keys, and flow preferences */
-  | { type: 'onboardingComplete'; engine: 'gemini' | 'deepgram'; geminiKey?: string; deepgramKey?: string; activationMode: 'wake' | 'manual'; postSendMode: 'continuous' | 'pause'; wakePhrase: string }
+  /** Onboarding completed — persist flow preferences (no keys; VTP is fully local) */
+  | { type: 'onboardingComplete'; activationMode: 'wake' | 'manual'; postSendMode: 'continuous' | 'pause'; wakePhrase: string }
   /** Settings panel saved new preferences */
   | { type: 'applySettings'; activationMode: 'wake' | 'manual'; postSendMode: 'continuous' | 'pause'; wakePhrase: string }
-  /** User switched transcription engine from the engine picker dropdown */
-  | { type: 'setEngine'; engine: 'gemini' | 'deepgram' }
   /** Voice activation toggle changed from the panel (legacy compat, kept for keybind path) */
-  | { type: 'setVoiceActivation'; enabled: boolean; wakePhrase: string };
+  | { type: 'setVoiceActivation'; enabled: boolean; wakePhrase: string }
+  /** User clicked the input meter while idle — run a short mic-only level test. */
+  | { type: 'micTest' }
+  /** User dragged the sensitivity marker on the input meter (dBFS). */
+  | { type: 'setInputGate'; db: number }
+  // ─── Local Vosk STT (webview → host) ──────────────────────────────────────
+  /** Vosk model finished loading in the webview and is ready to transcribe. */
+  | { type: 'voskReady' }
+  /** Vosk / mic error surfaced from the webview. */
+  | { type: 'voskError'; message: string }
+  /** Interim (partial) transcript while the user is speaking. */
+  | { type: 'voskPartial'; text: string }
+  /** Final transcript for a completed utterance. */
+  | { type: 'voskResult'; text: string };
 
 
 
@@ -93,9 +102,34 @@ export type ExtensionMessage =
   | { type: 'contextUpdate'; workspaceName: string; conversationTitle: string; pinned?: boolean; extrasCount?: number }
   | { type: 'settings'; vadMode: boolean }
   | { type: 'transcriptResult'; text: string }
-  | { type: 'apiKeyStatus'; hasKey: boolean }
-  /** Deepgram key status (optional — only sent when Deepgram is configured) */
-  | { type: 'deepgramKeyStatus'; hasKey: boolean; active: boolean; engine: 'gemini' | 'deepgram' }
+  /** Global hotkey combo, shown in the record hint. */
+  | { type: 'hotkeyStatus'; combo: string }
+  // ─── Local Vosk STT (host → webview) ──────────────────────────────────────
+  /**
+   * Model bytes streamed to the webview as base64 chunks (Antigravity's webview
+   * won't serve the large globalStorage file via fetch). `done` marks the last
+   * chunk; the webview reassembles them into a Blob for Vosk.createModel.
+   */
+  | { type: 'voskModelChunk'; data: string; index: number; count: number; done: boolean }
+  /** Create a fresh recognizer for a new capture session. */
+  | { type: 'voskStart' }
+  /** Feed a chunk of base64-encoded s16le/16kHz PCM (from host FFmpeg) to Vosk. */
+  | { type: 'voskPcm'; data: string }
+  /** Flush + tear down the recognizer at the end of a session. */
+  | { type: 'voskStop' }
+  /** Progress / status of the one-time model download + load. */
+  | { type: 'modelStatus'; state: 'downloading' | 'loading' | 'ready' | 'error'; pct?: number; message?: string }
+  // ─── Input meter ──────────────────────────────────────────────────────────
+  /** Mic capture started/stopped host-side. `device` is the OS input FFmpeg opened. */
+  | { type: 'micState'; on: boolean; device?: string; test?: boolean; gateDb?: number }
+  /**
+   * Live input level, emitted ~10×/sec while the mic is on. `rms`/`peak` are
+   * linear 0..1. `stalled` means FFmpeg has sent no bytes at all recently (dead
+   * device), as opposed to sending silence. `msSinceStt` is the time since Vosk
+   * last returned any words — lets the panel say "audio is fine, STT is not".
+   * `gateOpen` is whether audio is currently passing the sensitivity gate.
+   */
+  | { type: 'micLevel'; rms: number; peak: number; stalled: boolean; msSinceStt: number; gateOpen: boolean; gateDb: number }
 
   | { type: 'recordingStarted' }
   | { type: 'recordingStopped' }

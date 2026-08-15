@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{cspNonce}}'; connect-src https:; media-src *;" />
+    content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; img-src {{cspSource}} data:; script-src 'nonce-{{cspNonce}}' 'wasm-unsafe-eval' 'unsafe-eval' blob:; worker-src blob: data: 'self'; child-src blob: data:; connect-src {{cspSource}} blob: data:; media-src blob: mediastream:;" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="{{styleUri}}" />
   <title>Hands-Free Speech to Prompt</title>
@@ -19,46 +19,10 @@
       <div class="vtp-brand">
         <span class="vtp-brand-icon">🎙</span>
         <span class="vtp-brand-name">STP</span>
+        <span class="vtp-brand-badge" title="Runs 100% on your machine — no API key">local</span>
       </div>
       <div class="vtp-header-actions">
-        <button id="btn-info" class="btn-icon" title="How to get your API key">ℹ</button>
-
-        <!-- Engine picker -->
-        <div class="engine-picker" id="engine-picker">
-          <button id="btn-engine" class="btn-icon btn-engine" title="Switch transcription engine">
-            <span id="engine-label">⚡ Deepgram</span>
-          </button>
-          <div id="engine-menu" class="engine-menu hidden">
-            <button class="engine-option" data-engine="gemini">
-              <span class="eo-icon">✦</span>
-              <span class="eo-body">
-                <span class="eo-title">Gemini</span>
-                <span class="eo-desc">Google AI · ~4–5s chunks</span>
-              </span>
-              <span class="eo-check" id="eo-check-gemini">✓</span>
-            </button>
-            <button class="engine-option" data-engine="deepgram">
-              <span class="eo-icon">⚡</span>
-              <span class="eo-body">
-                <span class="eo-title">Deepgram</span>
-                <span class="eo-desc">Real-time · ~100ms latency</span>
-              </span>
-              <span class="eo-check" id="eo-check-deepgram">✓</span>
-            </button>
-            <div class="engine-menu-sep"></div>
-            <button class="engine-option engine-option-manage" id="eo-manage-keys">
-              <span class="eo-icon">🔑</span>
-              <span class="eo-body">
-                <span class="eo-title">Manage API Keys</span>
-              </span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Hidden compat stubs (JS still references these for key status) -->
-        <button id="btn-apikey" class="btn-icon btn-apikey-status" style="display:none">● KEY</button>
-        <button id="btn-deepgram" class="btn-icon btn-deepgram" style="display:none">⚡ LIVE</button>
-
+        <button id="btn-info" class="btn-icon" title="How VTP works (fully local)">ℹ</button>
         <button id="btn-target" class="btn-icon btn-target" title="Switch injection target (Antigravity / Claude Code)">
           <span id="btn-target-label">→ AG</span>
         </button>
@@ -67,9 +31,15 @@
       </div>
     </header>
 
-    <!-- Context badge — adapts based on injection target.
-         target=antigravity: shows workspace + Antigravity chat, click adds extra context.
-         target=claude-code: shows Claude lock state, click opens Claude conversation picker. -->
+    <!-- Model status banner (shown while the speech model downloads / loads) -->
+    <div id="model-banner" class="model-banner hidden">
+      <span id="model-banner-text">Preparing local speech model…</span>
+    </div>
+
+    <!-- Diagnostics strip (populated with webview errors / Vosk load trace) -->
+    <pre id="vtp-debug" class="vtp-debug hidden"></pre>
+
+    <!-- Context badge -->
     <button id="btn-context" class="context-card" title="Click to add extra conversation context">
       <span id="context-icon" class="context-icon">📂</span>
       <div class="context-info">
@@ -85,6 +55,18 @@
       <span id="status-text">Ready — press Record</span>
     </div>
 
+    <!-- Mic input meter — proves audio is (or isn't) reaching the recognizer -->
+    <div id="mic-meter" class="mic-meter is-off" title="Live microphone input level">
+      <span class="mic-meter-icon">🎤</span>
+      <div id="mic-meter-track" class="mic-meter-track"
+        title="Drag to set sensitivity — anything left of the marker is ignored">
+        <div id="mic-meter-mask" class="mic-meter-mask"></div>
+        <div id="mic-meter-peak" class="mic-meter-peak hidden"></div>
+        <div id="mic-meter-gate" class="mic-meter-gate"></div>
+      </div>
+      <span id="mic-meter-label" class="mic-meter-label">Mic off — click to test</span>
+    </div>
+
     <!-- Record + Pause buttons -->
     <div class="record-area">
       <button id="btn-record" class="btn-record" title="Click to start / stop recording">
@@ -98,7 +80,11 @@
 
     <!-- Transcript -->
     <div class="card" id="transcript-card">
-      <div class="card-label">Transcript</div>
+      <div class="card-head">
+        <span class="card-label">Transcript</span>
+        <button id="btn-clear" class="btn-clear" title="Clear the transcript buffer — mic keeps running">✕
+          Clear</button>
+      </div>
       <div id="transcript-box" class="transcript-box">Your speech will appear here...</div>
     </div>
 
@@ -135,11 +121,11 @@
           </tr>
           <tr>
             <td><code>send it</code> / <code>send the prompt</code></td>
-            <td>Sends directly into Antigravity — no click needed.</td>
+            <td>Sends directly into the chat — no click needed.</td>
           </tr>
           <tr>
             <td><code>enhance this prompt</code></td>
-            <td>Gemini rewrites it. Approve / Reject / Try Again inline.</td>
+            <td>A local Ollama model rewrites it. Approve / Reject / Try Again inline.</td>
           </tr>
           <tr>
             <td><code>approve</code> / <code>reject</code> / <code>try again</code></td>
@@ -150,7 +136,7 @@
             <td>Cleans the buffer in place — silent, no preview.</td>
           </tr>
           <tr>
-            <td><code>clean up and review</code> / <code>clean and review</code></td>
+            <td><code>clean up and review</code></td>
             <td>Cleans + shows preview. Approve / Reject / Try Again inline.</td>
           </tr>
           <tr class="glossary-divider">
@@ -158,8 +144,7 @@
           </tr>
           <tr>
             <td colspan="2" class="vc-note">Filler words and immediate repeats are stripped automatically.
-              Heavy noise (self-corrections, "actually", "I mean") triggers an LLM cleanup.
-              Skipped if you already said <code>enhance</code>, <code>clean it up</code>, or <code>clean up and review</code>.</td>
+              Heavy noise triggers a local cleanup if Ollama is installed.</td>
           </tr>
           <tr>
             <td><code>cancel</code> / <code>clear that</code></td>
@@ -185,8 +170,6 @@
             component. Send the prompt.</div>
           <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Explain what this function does. Send
             it.</div>
-          <div class="vc-example"><span class="vc-wake">hey antigravity</span>. Write tests for this file. Send the
-            prompt.</div>
         </div>
       </div>
     </details>
@@ -196,6 +179,7 @@
       <div class="card-label">⚡ Commands Fired</div>
       <div id="command-log" class="command-log"></div>
     </div>
+
     <!-- Settings panel (slide-in, hidden by default) -->
     <div id="settings-panel" class="settings-panel hidden">
       <div class="settings-inner">
@@ -253,65 +237,33 @@
       </div><!-- /settings-inner -->
     </div><!-- /settings-panel -->
 
-
     <!-- Spinner (hidden until elaboration starts) -->
     <div id="spinner" class="spinner hidden">
       <div class="spinner-ring"></div>
-      <span>Enhancing with Gemini...</span>
+      <span>Enhancing locally…</span>
     </div>
-
 
     <!-- ═══ Onboarding wizard (first-run only) ═══════════════════════════════ -->
     <div id="onboarding-overlay" class="onboarding-overlay hidden">
 
-      <!-- Screen 1: Welcome + Engine choice -->
+      <!-- Screen 1: Welcome -->
       <div class="ob-screen" id="ob-screen-1">
         <div class="ob-icon">🎙</div>
         <h1 class="ob-title">Welcome to STP</h1>
-        <p class="ob-subtitle">Speech to Prompt for Antigravity — let's get you set up in 3 steps.</p>
-        <p class="ob-step-label">Step 1 of 3 — Choose your transcription engine</p>
-        <div class="ob-choices">
-          <button class="ob-choice" id="ob-engine-deepgram">
-            <span class="ob-choice-icon">⚡</span>
-            <div class="ob-choice-body">
-              <div class="ob-choice-label">Deepgram <span class="ob-badge">Fastest</span></div>
-              <div class="ob-choice-desc">~300ms real-time streaming · Best for natural speech</div>
-            </div>
-          </button>
-          <button class="ob-choice" id="ob-engine-gemini">
-            <span class="ob-choice-icon">🔵</span>
-            <div class="ob-choice-body">
-              <div class="ob-choice-label">Gemini + FFmpeg</div>
-              <div class="ob-choice-desc">~3–5s per chunk · Uses your existing Gemini key</div>
-            </div>
-          </button>
+        <p class="ob-subtitle">Speech to Prompt — <strong>100% local</strong>. No API key, nothing leaves your machine.</p>
+        <div class="ob-local-facts">
+          <div class="ob-fact">🔒 Transcription runs on-device (Vosk)</div>
+          <div class="ob-fact">⬇ First run downloads a ~40&nbsp;MB speech model, once</div>
+          <div class="ob-fact">✨ Optional: install <strong>Ollama</strong> for smart "enhance"</div>
         </div>
+        <button class="ob-finish" id="ob-start">Get Started →</button>
       </div>
 
-      <!-- Screen 2: API Key entry -->
+      <!-- Screen 2: Flow mode -->
       <div class="ob-screen hidden" id="ob-screen-2">
         <div class="ob-back-row">
           <button class="ob-back" id="ob-back-2">← Back</button>
-          <span class="ob-step-label">Step 2 of 3</span>
-        </div>
-        <h2 class="ob-title" id="ob-key-title">Enter your API key</h2>
-        <p class="ob-subtitle" id="ob-key-desc">Your key is stored securely in VS Code SecretStorage and never leaves
-          this machine.</p>
-        <a class="ob-link" id="ob-key-link" href="#" target="_blank">Get a free key →</a>
-        <input class="ob-input" type="password" id="ob-key-input" placeholder="Paste your API key here"
-          autocomplete="off" />
-        <p class="ob-hint" id="ob-key-hint"></p>
-        <div class="ob-screen-actions">
-          <button class="ob-skip" id="ob-skip-key">Skip for now</button>
-          <button class="ob-next" id="ob-next-2">Continue →</button>
-        </div>
-      </div>
-
-      <!-- Screen 3: Flow mode -->
-      <div class="ob-screen hidden" id="ob-screen-3">
-        <div class="ob-back-row">
-          <button class="ob-back" id="ob-back-3">← Back</button>
-          <span class="ob-step-label">Step 3 of 3</span>
+          <span class="ob-step-label">Last step</span>
         </div>
         <h2 class="ob-title">How should prompts flow?</h2>
         <p class="ob-subtitle">You can change this anytime via <strong>⚙ Settings</strong> in the header.</p>
@@ -327,8 +279,7 @@
             <span class="ob-choice-icon">🎙</span>
             <div class="ob-choice-body">
               <div class="ob-choice-label">Voice Activated</div>
-              <div class="ob-choice-desc">Mic goes idle after each send. Say your wake phrase to start the next prompt.
-                Say "resume" or "I'm back" to resume from pause.</div>
+              <div class="ob-choice-desc">Mic goes idle after each send. Say your wake phrase to start the next prompt.</div>
             </div>
           </button>
         </div>
@@ -344,6 +295,9 @@
 
   </div><!-- /vtp-root -->
 
+  <script nonce="{{cspNonce}}" src="{{hookUri}}"></script>
+  <script nonce="{{cspNonce}}" src="{{voskUri}}"></script>
+  <script nonce="{{cspNonce}}" src="{{captureUri}}"></script>
   <script nonce="{{cspNonce}}" src="{{scriptUri}}"></script>
 </body>
 

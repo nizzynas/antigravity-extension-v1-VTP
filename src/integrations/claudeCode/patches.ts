@@ -27,32 +27,84 @@ import * as crypto from 'crypto';
 //   v7 — anchors capture minified var names (V/I4/D/he1 → z/E0/q/ve1 in 2.1.138)
 //        and panelTag now reads the actual panel var instead of hard-coding "V",
 //        which silently set __vtp_panel to a stale ref after the 2.1.138 rename
-export const PATCH_SCHEMA_VERSION = 7;
+export const PATCH_SCHEMA_VERSION = 9;
 
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
+/**
+ * Extension roots to scan, in preference order. Antigravity IDE (the current
+ * build) uses ~/.antigravity-ide; ~/.antigravity is the legacy folder and often
+ * still holds a stale, unloaded copy — patching that one silently does nothing.
+ */
+export const EXT_ROOTS: string[] = [
+  path.join(os.homedir(), '.antigravity-ide', 'extensions'),
+  path.join(os.homedir(), '.antigravity', 'extensions'),
+  path.join(os.homedir(), '.vscode', 'extensions'),
+  path.join(os.homedir(), '.vscode-insiders', 'extensions'),
+  path.join(os.homedir(), '.cursor', 'extensions'),
+  path.join(os.homedir(), '.windsurf', 'extensions'),
+];
+
+/** Numeric version tuple from a dir name like `anthropic.claude-code-2.1.219-win32-x64`. */
+function dirVersion(name: string): number[] {
+  const m = /^anthropic\.claude-code-(\d+(?:\.\d+)*)/i.exec(name);
+  if (!m) return [0];
+  return m[1].split('.').map((n) => parseInt(n, 10) || 0);
+}
+
+function compareVersions(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/** Dir names VS Code has marked dead in `<root>/.obsolete` — never loaded again. */
+function obsoleteNames(root: string): Set<string> {
+  try {
+    const raw = fs.readFileSync(path.join(root, '.obsolete'), 'utf-8');
+    const parsed = JSON.parse(raw);
+    return new Set(Object.keys(parsed).filter((k) => parsed[k]));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Locate the Claude Code extension dir the host IDE would actually load.
+ *
+ * Scans every known root (not just the first that has a match), drops versions
+ * listed in `.obsolete`, and picks the highest version numerically — plain lex
+ * sort ranks 2.1.9 above 2.1.219.
+ */
 export function findClaudeCodeExtDir(): string | null {
   if (process.env.CLAUDE_CODE_EXT_DIR && fs.existsSync(process.env.CLAUDE_CODE_EXT_DIR)) {
     return process.env.CLAUDE_CODE_EXT_DIR;
   }
-  const roots = [
-    path.join(os.homedir(), '.antigravity', 'extensions'),
-    path.join(os.homedir(), '.vscode', 'extensions'),
-    path.join(os.homedir(), '.cursor', 'extensions'),
-  ];
-  for (const root of roots) {
-    if (!fs.existsSync(root)) continue;
-    const matches = fs.readdirSync(root)
-      .filter((name) => /^anthropic\.claude-code-/i.test(name))
-      .map((name) => path.join(root, name))
-      .filter((p) => {
-        try { return fs.statSync(p).isDirectory(); } catch { return false; }
-      })
-      .sort()
-      .reverse();
-    if (matches.length > 0) return matches[0];
-  }
-  return null;
+
+  const candidates: Array<{ dir: string; version: number[]; rootRank: number }> = [];
+  EXT_ROOTS.forEach((root, rootRank) => {
+    if (!fs.existsSync(root)) return;
+    const dead = obsoleteNames(root);
+    let names: string[];
+    try { names = fs.readdirSync(root); } catch { return; }
+    for (const name of names) {
+      if (!/^anthropic\.claude-code-/i.test(name)) continue;
+      if (dead.has(name)) continue;
+      const dir = path.join(root, name);
+      try {
+        if (!fs.statSync(dir).isDirectory()) continue;
+        // A real, loadable install — guards against leftover partial unzips.
+        if (!fs.existsSync(path.join(dir, 'extension.js'))) continue;
+      } catch { continue; }
+      candidates.push({ dir, version: dirVersion(name), rootRank });
+    }
+  });
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => compareVersions(b.version, a.version) || a.rootRank - b.rootRank);
+  return candidates[0].dir;
 }
 
 export interface ExtensionFiles {
@@ -416,12 +468,23 @@ export const PATCHES: Record<string, Patch> = {
   // panel var unambiguously. Previously the panel name was hard-coded "V", which
   // silently broke when 2.1.138 renamed the parameter.
   // The /g flag patches all three occurrences in one pass.
+  // Two shapes, because where the panel is named moved. Up to 2.1.138 a
+  // `.webview.onDidReceiveMessage` followed the add() and named it; in 2.1.232
+  // an object literal follows instead and names it in `isVisible:()=>e.visible`.
+  // Matching only the first shape is what broke on the 2.1.232 update, and it
+  // broke quietly — the other six anchors still matched, so the patch reported
+  // success while the one thing that lets you aim at a conversation was gone.
+  // Both alternatives live in one anchor so this stays a single patch that
+  // either applies or does not, rather than two that half-apply.
   extJs_panelTag: {
     file: 'extJs',
-    anchor: /this\.allComms\.add\((\w+)\)((?:,this\.broadcastSessionStates\(\))?,(\w+)\.webview\.onDidReceiveMessage)/g,
+    anchor: /this\.allComms\.add\((\w+)\)(?:(,\1\.onClientInit=\(\)=>this\.broadcastSessionStates\(\);let \w+=\{isVisible:\(\)=>(\w+)\.visible)|((?:,this\.broadcastSessionStates\(\))?,(\w+)\.webview\.onDidReceiveMessage))/g,
     appliedMarker: /\.__vtp_panel=\w+,this\.allComms\.add/,
-    replacement: (_m, commVar, tail, panelVar) =>
-      `${commVar}.__vtp_panel=${panelVar},this.allComms.add(${commVar})${tail}`,
+    replacement: (_m, commVar, newTail, newPanel, oldTail, oldPanel) => {
+      const tail = newTail ?? oldTail;
+      const panel = newPanel ?? oldPanel;
+      return `${commVar}.__vtp_panel=${panel},this.allComms.add(${commVar})${tail}`;
+    },
   },
   // Captures three minified identifiers — subscriptions ctx, vscode-ns, manager —
   // which differ between releases (V/I4/D in 2.1.126, z/E0/q in 2.1.138).
@@ -443,17 +506,29 @@ export const PATCHES: Record<string, Patch> = {
       +   'try{return [...' + mgr + '.allComms].map(function(c){return c.__vtp_panel&&c.__vtp_panel.title||""}).filter(Boolean)}catch(e){return []}'
       + '}));',
   },
+  // The message variable is read from the file rather than assumed.
+  //
+  // It was hard-coded as `$`, which is what 2.1.126 called it. 2.1.233 calls
+  // it `e`, so the inserted case read `$.request.targetTitle`, threw a
+  // ReferenceError into its own try/catch, and did nothing — with the patch
+  // reporting applied, the command dispatching, and the file containing
+  // exactly the code we meant to put there. Nothing anywhere said it was
+  // broken; the only symptom was that text never appeared.
+  //
+  // The name is captured from a neighbouring case in the same switch. The
+  // character class allows `$` and `_`: minifiers use both, and `\w` matching
+  // neither is why the old build looked like it had no anchor at all.
   wvJs_handler: {
     file: 'wvJs',
-    anchor: /case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
+    anchor: /([\w$]+)\.request\.[\s\S]{0,600}?case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
     // v5: webview filter stays permissive (real filter is extension-side).
     // If Claude ever populates document.title, the strip helper compares the
     // truncated form vs the full form correctly.
     appliedMarker: /vtpStripMatch/,
-    replacement: (m) =>
+    replacement: (m, msg) =>
       m
-      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";var _dt=document.title||"";console.log("[VTP] inject req — title=",_dt,"lock=",_t);var vtpStripMatch=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch(_dt,_t))break;window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
-      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";var _dt2=document.title||"";var vtpStripMatch2=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch2(_dt2,_t2)){console.log("[VTP] skip submit",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
+      + 'case"vtp_inject_prompt":try{var _t=' + msg + '.request.targetTitle||"";var _dt=document.title||"";console.log("[VTP] inject req — title=",_dt,"lock=",_t);var vtpStripMatch=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch(_dt,_t))break;window.__vtp_inject(' + msg + '.request.text,' + msg + '.request.submit)}catch(e){console.error("[VTP]",e)}break;'
+      + 'case"vtp_submit_only":try{var _t2=' + msg + '.request.targetTitle||"";var _dt2=document.title||"";var vtpStripMatch2=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch2(_dt2,_t2)){console.log("[VTP] skip submit",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
   },
   // Identifier varies (he1 in 2.1.126, ve1 in 2.1.138); match any.
   wvJs_helper: {
@@ -472,9 +547,21 @@ export type PatchStatus = 'applied' | 'unapplied' | 'broken';
 export function patchStatus(content: string, patch: Patch): PatchStatus {
   if ((patch as JsonPatch).json) return 'applied'; // json handled separately
   const rx = patch as RegexPatch;
-  if (rx.appliedMarker.test(content)) return 'applied';
-  if (rx.anchor.test(content)) return 'unapplied';
+  // Asked afresh each time. A /g regex remembers where it stopped, so calling
+  // .test() on the same object twice answers about the rest of the file rather
+  // than the file — and the second answer is usually "no". One anchor here is
+  // /g, and the check runs more than once per session now that health reports
+  // it, so a patch that was fine would read as broken every other look.
+  if (matches(rx.appliedMarker, content)) return 'applied';
+  if (matches(rx.anchor, content)) return 'unapplied';
   return 'broken';
+}
+
+function matches(rx: RegExp, content: string): boolean {
+  rx.lastIndex = 0;
+  const hit = rx.test(content);
+  rx.lastIndex = 0;
+  return hit;
 }
 
 export function applyPatches(files: ExtensionFiles): {

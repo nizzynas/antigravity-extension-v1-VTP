@@ -1,21 +1,28 @@
 import * as vscode from 'vscode';
 import { VTPPanel } from './panel/VTPPanel';
-import { SecretManager } from './config/SecretManager';
+import { VoskModelManager } from './audio/VoskModelManager';
 import { ensurePatched, restoreOriginal, getStatus } from './integrations/claudeCode/patcher';
 import { pickAndLockConversation, getLockedTitle, setLockedTitle, listClaudeConversations } from './integrations/claudeCode/conversations';
+import { TeeChannel } from './util/DebugLog';
+import { checkHealth, describeHealth, healthFile } from './integrations/claudeCode/health';
+import { Inbox } from './integrations/inbox';
+import { KeepPatched } from './integrations/claudeCode/keepPatched';
 
 let panel: VTPPanel | undefined;
 export let logger: vscode.OutputChannel;
 
 export function activate(context: vscode.ExtensionContext): void {
-  // Output channel — visible via View → Output → "VTP"
-  logger = vscode.window.createOutputChannel('VTP');
+  logger = new TeeChannel(vscode.window.createOutputChannel('VTP'));
   context.subscriptions.push(logger);
-  logger.appendLine('[VTP] Extension activating...');
+  logger.appendLine('[VTP] Extension activating (fully-local build)...');
+  logger.appendLine(
+    `[VTP] env: ${vscode.env.appName} ${vscode.version} · node ${process.version} · ` +
+    `${process.platform}/${process.arch} · ext ${context.extension.packageJSON.version}`,
+  );
+  logger.appendLine(`[VTP] debug log mirrored to ${TeeChannel.logPath}`);
 
-  const secretManager = new SecretManager(context.secrets);
-  // Pass globalState so VTPPanel can persist the onboarding-complete flag
-  panel = new VTPPanel(context.extensionUri, secretManager, logger, context.globalState);
+  const modelManager = new VoskModelManager(context.globalStorageUri, (m) => logger.appendLine(m));
+  panel = new VTPPanel(context.extensionUri, logger, context.globalState, modelManager);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(VTPPanel.viewId, panel, {
@@ -30,27 +37,28 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('vtp.setApiKey', async () => {
-      const key = await secretManager.promptForApiKey();
-      if (key) {
-        logger.appendLine('[VTP] API key saved.');
-        vscode.window.showInformationMessage('VTP: Gemini API key saved.');
+    vscode.commands.registerCommand('vtp.toggleRecording', async () => {
+      await vscode.commands.executeCommand('workbench.view.extension.vtp-sidebar');
+      panel?.toggleRecording();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vtp.openDebugLog', async () => {
+      try {
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(TeeChannel.logPath));
+        await vscode.window.showTextDocument(doc, { preview: false });
+      } catch {
+        vscode.window.showWarningMessage(`VTP: no debug log yet at ${TeeChannel.logPath}`);
       }
     }),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('vtp.stopRecording', () => {
-      logger.appendLine('[VTP] Stop recording command invoked.');
-    }),
-  );
-
-  // ── vtp.toggleRecording — bound to Ctrl+Shift+Space via contributes.keybindings ──
-  // Users can remap via: Keyboard Shortcuts editor → search "VTP: Toggle Recording"
-  context.subscriptions.push(
-    vscode.commands.registerCommand('vtp.toggleRecording', async () => {
-      await vscode.commands.executeCommand('workbench.view.extension.vtp-sidebar');
-      panel?.toggleRecording();
+    vscode.commands.registerCommand('vtp.redownloadModel', async () => {
+      await modelManager.clearCache();
+      vscode.window.showInformationMessage('VTP: Speech model cache cleared. Reload the window to re-download.', 'Reload Window')
+        .then((a) => { if (a === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow'); });
     }),
   );
 
@@ -62,14 +70,11 @@ export function activate(context: vscode.ExtensionContext): void {
       const current = cfg.get<string>('injectionTarget', 'antigravity');
       const pick = await vscode.window.showQuickPick([
         { label: 'Antigravity', description: 'Native Antigravity chat (default)', value: 'antigravity', picked: current === 'antigravity' },
-        { label: 'Claude Code', description: 'Anthropic Claude Code extension (requires patch + Deepgram)', value: 'claude-code', picked: current === 'claude-code' },
+        { label: 'Claude Code', description: 'Anthropic Claude Code extension (requires patch)', value: 'claude-code', picked: current === 'claude-code' },
       ], { title: 'VTP — Where do prompts go?', placeHolder: 'Select injection target' });
       if (!pick) return;
       await cfg.update('injectionTarget', pick.value, vscode.ConfigurationTarget.Global);
       logger.appendLine(`[VTP] injection target → ${pick.value}`);
-      if (pick.value === 'claude-code') {
-        await ensureDeepgramForClaudeCode(secretManager, logger);
-      }
       vscode.window.showInformationMessage(`VTP: target switched to ${pick.label}.`);
     }),
   );
@@ -168,68 +173,76 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  // Auto-patch on startup (idempotent, throws only on anchor mismatch)
-  ensurePatched((m) => logger.appendLine(m)).catch((e) => {
-    logger.appendLine(`[VTP] auto-patch error: ${e?.message ?? e}`);
-  });
+  const keep = new KeepPatched((m) => logger.appendLine(m));
 
-  // Watch for target setting changes — enforce Deepgram for claude-code + refresh panel UI
   context.subscriptions.push(
-    vscode.workspace.onDidChangeConfiguration((evt) => {
-      const targetChanged = evt.affectsConfiguration('vtp.injectionTarget');
-      const lockChanged   = evt.affectsConfiguration('vtp.claudeCodeLockedTitle');
-      if (targetChanged) {
-        const target = vscode.workspace.getConfiguration('vtp').get<string>('injectionTarget', 'antigravity');
-        if (target === 'claude-code') {
-          ensureDeepgramForClaudeCode(secretManager, logger).catch(() => {});
+    vscode.commands.registerCommand('vtp.checkClaudeCode', async () => {
+      const h = await checkHealth();
+      logger.appendLine(`[VTP] ${describeHealth(h)}`);
+      for (const w of h.wrong) logger.appendLine(`[VTP]   ${w}`);
+      logger.appendLine(`[VTP] written to ${healthFile()}`);
+      if (h.working) {
+        vscode.window.showInformationMessage(describeHealth(h));
+      } else {
+        vscode.window.showErrorMessage(describeHealth(h), 'Re-apply patch', 'Show log').then(async (a) => {
+          if (a === 'Re-apply patch') await vscode.commands.executeCommand('vtp.patchClaudeCode');
+          if (a === 'Show log') logger.show(true);
+        });
+      }
+    }),
+  );
+
+  // Auto-patch on startup (idempotent, throws only on anchor mismatch)
+  ensurePatched((m) => logger.appendLine(m))
+    .catch((e) => {
+      logger.appendLine(`[VTP] auto-patch error: ${e?.message ?? e}`);
+    })
+    // Then say whether it actually worked, rather than whether it ran. An
+    // update that moves one anchor leaves a patch that applied, a marker that
+    // looks right and a feature that silently does nothing; this is the only
+    // line in the log that knows the difference.
+    .then(() => checkHealth())
+    .then((h) => {
+      logger.appendLine(`[VTP] ${describeHealth(h)}`);
+      for (const w of h.wrong) logger.appendLine(`[VTP]   ${w}`);
+      // Said out loud only when it is broken, and the offer matches the
+      // reason. Files patched but the command missing means this window
+      // started before the patch and only a reload fixes it — offering
+      // "re-apply" there patches an already-patched file and changes nothing,
+      // which is how you conclude the thing is simply broken.
+      if (!h.working && h.claudeCode.dir) {
+        const filesFine = Object.values(h.patches).every((s) => s === 'applied');
+        if (filesFine && !h.commands.inject) {
+          void keep.offerReload('VTP has patched Claude Code, but this window started before the patch. Reload to use it.');
+        } else {
+          vscode.window.showWarningMessage(describeHealth(h), 'Re-apply patch').then(async (a) => {
+            if (a === 'Re-apply patch') await vscode.commands.executeCommand('vtp.patchClaudeCode');
+          });
         }
       }
-      if (targetChanged || lockChanged) {
+    })
+    .catch(() => { /* the check must never be the thing that breaks activation */ });
+
+  // The way in for anything outside the IDE — Hangar handing over a note.
+  const inbox = new Inbox((m) => logger.appendLine(m));
+  inbox.start();
+  context.subscriptions.push({ dispose: () => inbox.dispose() });
+
+  // Claude Code updates itself while a window is open, so patching only at
+  // activation leaves every window one version behind for good.
+  keep.start();
+  context.subscriptions.push({ dispose: () => keep.dispose() });
+
+  // Refresh the panel's target card when the injection target / lock changes.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((evt) => {
+      if (evt.affectsConfiguration('vtp.injectionTarget') || evt.affectsConfiguration('vtp.claudeCodeLockedTitle')) {
         panel?.sendTargetState().catch(() => {});
       }
     }),
   );
 
   logger.appendLine('[VTP] Extension activated successfully.');
-}
-
-/**
- * When the user routes prompts to Claude Code, force the Deepgram engine.
- * If the Deepgram key isn't configured, trigger the existing onboarding via
- * VTP: Set Deepgram Key flow. If they decline, revert the target.
- */
-async function ensureDeepgramForClaudeCode(
-  secretManager: SecretManager,
-  log: vscode.OutputChannel,
-): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration('vtp');
-  const dgKey = await secretManager.getSecret('vtp.deepgramApiKey');
-  if (!dgKey) {
-    const action = await vscode.window.showWarningMessage(
-      'Claude Code target requires Deepgram for low-latency voice commands. Set up your Deepgram key now?',
-      'Set Up Deepgram',
-      'Revert to Antigravity',
-    );
-    if (action === 'Revert to Antigravity') {
-      await cfg.update('injectionTarget', 'antigravity', vscode.ConfigurationTarget.Global);
-      log.appendLine('[VTP] reverted target → antigravity (no Deepgram key)');
-      return;
-    }
-    if (action === 'Set Up Deepgram') {
-      // Open the existing Deepgram key entry flow via the panel command.
-      // The user goes through SettingsManager.handleDeepgramKey() which both
-      // stores the key and switches transcriptionEngine to deepgram.
-      await vscode.commands.executeCommand('workbench.view.extension.vtp-sidebar');
-      vscode.window.showInformationMessage('VTP: Click DG in the panel to enter your Deepgram key.');
-    }
-    return;
-  }
-  const engine = cfg.get<string>('transcriptionEngine', 'gemini');
-  if (engine !== 'deepgram') {
-    await cfg.update('transcriptionEngine', 'deepgram', vscode.ConfigurationTarget.Global);
-    log.appendLine('[VTP] forced transcriptionEngine → deepgram (Claude Code target)');
-    vscode.window.showInformationMessage('VTP: switched to Deepgram engine for Claude Code target.');
-  }
 }
 
 export function deactivate(): void {

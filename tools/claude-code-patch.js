@@ -19,34 +19,76 @@ const os   = require('os');
 const crypto = require('crypto');
 
 // Bump in lockstep with src/integrations/claudeCode/patches.ts PATCH_SCHEMA_VERSION.
-const PATCH_SCHEMA_VERSION = 7;
+const PATCH_SCHEMA_VERSION = 9;
 
 // ─── Extension discovery ─────────────────────────────────────────────────────
 
 /**
- * Antigravity is a VS Code fork. It stores extensions under ~/.antigravity/extensions.
- * Returns the latest installed Claude Code extension dir, or null if none found.
+ * Antigravity is a VS Code fork. The current build stores extensions under
+ * ~/.antigravity-ide/extensions; ~/.antigravity is the legacy folder and often
+ * still holds a stale copy the IDE never loads.
+ * Returns the newest live Claude Code extension dir, or null if none found.
  */
+const EXT_ROOTS = [
+  path.join(os.homedir(), '.antigravity-ide', 'extensions'),
+  path.join(os.homedir(), '.antigravity', 'extensions'),
+  path.join(os.homedir(), '.vscode', 'extensions'),
+  path.join(os.homedir(), '.vscode-insiders', 'extensions'),
+  path.join(os.homedir(), '.cursor', 'extensions'),
+  path.join(os.homedir(), '.windsurf', 'extensions'),
+];
+
+function dirVersion(name) {
+  const m = /^anthropic\.claude-code-(\d+(?:\.\d+)*)/i.exec(name);
+  if (!m) return [0];
+  return m[1].split('.').map(n => parseInt(n, 10) || 0);
+}
+
+function compareVersions(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] || 0) - (b[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/** Dir names VS Code has marked dead in `<root>/.obsolete` — never loaded again. */
+function obsoleteNames(root) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(root, '.obsolete'), 'utf-8'));
+    return new Set(Object.keys(parsed).filter(k => parsed[k]));
+  } catch {
+    return new Set();
+  }
+}
+
 function findClaudeCodeExtDir() {
   if (process.env.CLAUDE_CODE_EXT_DIR && fs.existsSync(process.env.CLAUDE_CODE_EXT_DIR)) {
     return process.env.CLAUDE_CODE_EXT_DIR;
   }
-  const candidates = [
-    path.join(os.homedir(), '.antigravity', 'extensions'),
-    path.join(os.homedir(), '.vscode', 'extensions'),
-    path.join(os.homedir(), '.cursor', 'extensions'),
-  ];
-  for (const root of candidates) {
-    if (!fs.existsSync(root)) continue;
-    const matches = fs.readdirSync(root)
-      .filter(name => /^anthropic\.claude-code-/i.test(name))
-      .map(name => path.join(root, name))
-      .filter(p => fs.statSync(p).isDirectory())
-      .sort()
-      .reverse(); // newest version first (lex sort works for x.y.z)
-    if (matches.length > 0) return matches[0];
-  }
-  return null;
+
+  const found = [];
+  EXT_ROOTS.forEach((root, rootRank) => {
+    if (!fs.existsSync(root)) return;
+    const dead = obsoleteNames(root);
+    let names;
+    try { names = fs.readdirSync(root); } catch { return; }
+    for (const name of names) {
+      if (!/^anthropic\.claude-code-/i.test(name)) continue;
+      if (dead.has(name)) continue;
+      const dir = path.join(root, name);
+      try {
+        if (!fs.statSync(dir).isDirectory()) continue;
+        if (!fs.existsSync(path.join(dir, 'extension.js'))) continue;
+      } catch { continue; }
+      found.push({ dir, version: dirVersion(name), rootRank });
+    }
+  });
+
+  if (found.length === 0) return null;
+  // Numeric compare, not lex — lex ranks 2.1.9 above 2.1.219.
+  found.sort((a, b) => compareVersions(b.version, a.version) || a.rootRank - b.rootRank);
+  return found[0].dir;
 }
 
 // ─── File paths ──────────────────────────────────────────────────────────────
@@ -109,11 +151,20 @@ const PATCHES = {
   // can capture the panel variable name (V in 2.1.126, z in 2.1.138). Without
   // this, the inserted "<comm>.__vtp_panel=V" would silently reference an
   // out-of-scope V in newer builds, breaking title-based panel routing.
+  // Two shapes, because where the panel is named moved. Up to 2.1.138 a
+  // `.webview.onDidReceiveMessage` followed the add() and named it; in 2.1.232
+  // an object literal follows instead and names it in `isVisible:()=>e.visible`.
+  // Matching only the first is what broke on the 2.1.232 update, and it broke
+  // quietly: the other six anchors still matched, so the patch reported success
+  // while the one thing that lets you aim at a conversation was gone.
   extJs_panelTag: {
     file: 'extJs',
-    anchor: /this\.allComms\.add\((\w+)\)((?:,this\.broadcastSessionStates\(\))?,(\w+)\.webview\.onDidReceiveMessage)/g,
+    anchor: /this\.allComms\.add\((\w+)\)(?:(,\1\.onClientInit=\(\)=>this\.broadcastSessionStates\(\);let \w+=\{isVisible:\(\)=>(\w+)\.visible)|((?:,this\.broadcastSessionStates\(\))?,(\w+)\.webview\.onDidReceiveMessage))/g,
     appliedMarker: /\.__vtp_panel=\w+,this\.allComms\.add/,
-    replacement: (m) => m[1] + '.__vtp_panel=' + m[3] + ',this.allComms.add(' + m[1] + ')' + m[2],
+    replacement: (m) => {
+      const comm = m[1], tail = m[2] !== undefined ? m[2] : m[4], panel = m[3] !== undefined ? m[3] : m[5];
+      return comm + '.__vtp_panel=' + panel + ',this.allComms.add(' + comm + ')' + tail;
+    },
   },
 
   // Patch 3: extension.js — register commands on activation. Sibling to toggleDictation.
@@ -144,14 +195,21 @@ const PATCHES = {
   // Patch 4: webview/index.js — add vtp_inject_prompt + vtp_submit_only cases to
   // the handleRequestInner switch. v5: permissive match with ellipsis strip
   // (extension-side filter is the real gate; this is belt-and-suspenders).
+  // The message variable is read from the file rather than assumed. It was
+  // hard-coded as `$`, which is what 2.1.126 called it; 2.1.233 calls it `e`,
+  // so the inserted case threw a ReferenceError into its own try/catch and did
+  // nothing — patch applied, command dispatching, text never appearing.
+  // `[\w$]` because minifiers use `$` and `_`, and `\w` matches neither.
   wvJs_handler: {
     file: 'wvJs',
-    anchor: /case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
+    anchor: /([\w$]+)\.request\.[\s\S]{0,600}?case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
     appliedMarker: /vtpStripMatch/,
-    replacement: (m) =>
-      m[0]
-      + 'case"vtp_inject_prompt":try{var _t=$.request.targetTitle||"";var _dt=document.title||"";console.log("[VTP] inject req — title=",_dt,"lock=",_t);var vtpStripMatch=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch(_dt,_t))break;window.__vtp_inject($.request.text,$.request.submit)}catch(e){console.error("[VTP]",e)}break;'
-      + 'case"vtp_submit_only":try{var _t2=$.request.targetTitle||"";var _dt2=document.title||"";var vtpStripMatch2=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch2(_dt2,_t2)){console.log("[VTP] skip submit",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
+    replacement: (m) => {
+      const v = m[1];
+      return m[0]
+        + 'case"vtp_inject_prompt":try{var _t=' + v + '.request.targetTitle||"";var _dt=document.title||"";console.log("[VTP] inject req — title=",_dt,"lock=",_t);var vtpStripMatch=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\u2026.]+\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\u2026.]+\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch(_dt,_t))break;window.__vtp_inject(' + v + '.request.text,' + v + '.request.submit)}catch(e){console.error("[VTP]",e)}break;'
+        + 'case"vtp_submit_only":try{var _t2=' + v + '.request.targetTitle||"";var _dt2=document.title||"";var vtpStripMatch2=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\u2026.]+\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\u2026.]+\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch2(_dt2,_t2)){console.log("[VTP] skip submit",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;';
+    },
   },
 
   // Patch 5: webview/index.js — prepend the runtime helper at the very top.
@@ -495,8 +553,12 @@ const VTP_RUNTIME_HELPER = `
  * Returns 'applied', 'unapplied', or 'broken'.
  */
 function patchStatus(content, patch) {
-  if (patch.appliedMarker && patch.appliedMarker.test(content)) return 'applied';
-  if (patch.anchor.test(content)) return 'unapplied';
+  // Asked afresh each time: a /g regex remembers where it stopped, so testing
+  // the same object twice answers about the rest of the file rather than the
+  // file, and the second answer is usually "no".
+  const matches = (rx) => { rx.lastIndex = 0; const hit = rx.test(content); rx.lastIndex = 0; return hit; };
+  if (patch.appliedMarker && matches(patch.appliedMarker)) return 'applied';
+  if (matches(patch.anchor)) return 'unapplied';
   return 'broken';
 }
 

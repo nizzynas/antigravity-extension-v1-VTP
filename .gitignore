@@ -4,3 +4,9 @@ node_modules/
 *.vsix
 .env
 
+# Copied from node_modules at build time by tools/stage-media.js. It is
+# vosk-browser's own build, byte for byte, and has to sit inside the extension
+# because a webview cannot fetch script from anywhere else — but 5.6MB of a
+# dependency does not belong in a public repo's history, where it could never
+# be taken back out.
+media/vendor/

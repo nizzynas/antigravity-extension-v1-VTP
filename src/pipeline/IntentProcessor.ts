@@ -1,12 +1,26 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { IntentResult, WorkspaceContext } from '../types';
 
-// ─── Fast local phrase gates — avoid an API round-trip for unambiguous cases ─
+/**
+ * IntentProcessor — 100% local, offline intent classification.
+ *
+ * Earlier versions round-tripped every mixed segment to Gemini. VTP is now fully
+ * local: classification is done with fast phrase gates + light heuristics, so
+ * there is no network call and no API key. The vast majority of dictation is
+ * PROMPT_CONTENT anyway; the trigger words (send / enhance / cancel / command)
+ * are unambiguous enough to match locally with high precision.
+ *
+ * Intent types:
+ *   PROMPT_CONTENT — developer narrating what to build (default)
+ *   ENHANCE        — explicit request to elaborate the accumulated prompt
+ *   SEND           — explicit request to inject the prompt as-is
+ *   COMMAND        — immediate IDE/OS/terminal action (unambiguous only)
+ *   CANCEL         — discard everything and restart
+ */
 
 const SEND_PHRASES = [
   'ok send', 'okay send', 'send it', 'send message', 'go ahead and send',
   'submit this', 'send this', 'send that', 'send the prompt', 'go send',
-  'please send', 'just send', 'send this prompt', 'send that prompt',
+  'please send', 'just send', 'send this prompt', 'send that prompt', 'send now',
 ];
 const ENHANCE_PHRASES = [
   'enhance prompt', 'enhance this', 'enhance it', 'enhance the prompt',
@@ -15,154 +29,78 @@ const ENHANCE_PHRASES = [
   'enhance that', 'elaborate that',
 ];
 const CANCEL_PHRASES = [
-  'cancel', 'never mind', 'start over', 'forget it', 'clear that', 'discard',
+  'cancel', 'never mind', 'nevermind', 'start over', 'forget it', 'clear that', 'discard',
 ];
 
-// Minimum word count — single words / mic noise skipped
+// Unambiguous IDE/OS/terminal directives → COMMAND. Kept conservative: only
+// verbs that clearly target the environment, never "build/make/add a <feature>".
+const COMMAND_RE =
+  /^(?:please\s+)?(?:open the terminal|open terminal|run the tests?|run tests?|git commit|git push|git status|open the file explorer|split the editor|toggle the sidebar|format the (?:file|document)|save the file|save all)\b/i;
+
+// Trailing send/enhance triggers appended to real content, e.g.
+// "add a dark mode toggle, send the prompt".
+const SEND_TAIL_RE = /\b(send (?:it|this|that|the prompt|this prompt|that prompt|now|message)|ok(?:ay)? send|please send|just send|submit this)\b\s*[.!?]*\s*$/i;
+const ENHANCE_TAIL_RE = /\b(enhance (?:this|it|that|the prompt|prompt)|elaborate (?:this|that|the prompt)|improve this prompt|make it better|expand this|rewrite this prompt)\b\s*[.!?]*\s*$/i;
+
+const FILLER_STRIP_RE = /\b(uh+|um+|er+h?|like|you know|i mean|basically|so|well)\b/gi;
+
 const MIN_WORD_COUNT = 2;
 
-// Model cascade: 2 active stable models as of April 2026 (2.0-flash + 1.5-flash deprecated/removed).
-const MODEL_CASCADE = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
-
-/**
- * Classifies each transcript segment AND extracts the clean prompt content.
- *
- * Intent types:
- *   PROMPT_CONTENT — developer narrating what to build (default, vast majority)
- *   ENHANCE        — explicit request to elaborate the accumulated prompt
- *   SEND           — explicit request to inject the prompt as-is
- *   COMMAND        — immediate IDE/OS/terminal action (rare, must be unambiguous)
- *   CANCEL         — discard everything and restart
- */
 export class IntentProcessor {
-  private readonly genAI: GoogleGenerativeAI;
-
-  constructor(apiKey: string) {
-    this.genAI = new GoogleGenerativeAI(apiKey);
-  }
+  // Constructor kept for call-site compatibility; the argument is ignored now
+  // that classification is fully local.
+  constructor(_unused?: unknown) {}
 
   async classify(
     segment: string,
-    promptBuffer: string,
-    context: WorkspaceContext,
+    _promptBuffer: string,
+    _context: WorkspaceContext,
   ): Promise<IntentResult> {
-    const lower = segment.toLowerCase().trim();
+    const raw = segment.trim();
+    const lower = raw.toLowerCase();
+    const stripLead = (s: string) => s.replace(/^(uh|um|okay|ok)\s+/i, '').trim();
     const wordCount = lower.split(/\s+/).filter(Boolean).length;
 
-    // Too short — likely mic noise, treat as content with no LLM call
     if (wordCount < MIN_WORD_COUNT) {
       return { type: 'PROMPT_CONTENT', content: segment };
     }
 
-    // Fast local gates for unambiguous standalone commands
-    if (ENHANCE_PHRASES.some((p) => lower === p || lower.replace(/^(uh|um)\s+/, '') === p)) {
+    // ── Standalone, exact-ish trigger phrases ────────────────────────────────
+    if (ENHANCE_PHRASES.some((p) => lower === p || stripLead(lower) === p)) {
       return { type: 'ENHANCE', content: '' };
     }
-    if (SEND_PHRASES.some((p) => lower === p || lower.replace(/^(uh|um)\s+/, '') === p)) {
+    if (SEND_PHRASES.some((p) => lower === p || stripLead(lower) === p)) {
       return { type: 'SEND', content: '' };
     }
     if (CANCEL_PHRASES.some((p) => lower === p || lower.startsWith(p + ' '))) {
       return { type: 'CANCEL', content: '' };
     }
 
-    // LLM handles mixed segments — cascade through models on 503 overload
-    const systemPrompt = this.buildClassifierPrompt(context, promptBuffer);
-    const lastErr: unknown[] = [];
-
-    for (const modelName of MODEL_CASCADE) {
-      try {
-        const model = this.genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent([
-          { text: systemPrompt },
-          { text: `Classify and extract: "${segment}"` },
-        ]);
-        return this.parseResponse(result.response.text(), segment);
-      } catch (err: unknown) {
-        const msg = String(err);
-        const is5xxOrGone = msg.includes('503') || msg.includes('500') ||
-                             msg.includes('404') || msg.includes('Service Unavailable') ||
-                             msg.includes('high demand') || msg.includes('overloaded') ||
-                             msg.includes('no longer available') || msg.includes('Internal error');
-        if (is5xxOrGone) {
-          lastErr.push(err);
-          continue; // try next model immediately — no wait
-        }
-        throw err; // non-503 (e.g. 429, auth) — rethrow for caller
-      }
+    // ── Unambiguous IDE/OS command ───────────────────────────────────────────
+    if (COMMAND_RE.test(lower)) {
+      return { type: 'COMMAND', content: '', commandIntent: raw };
     }
 
-    // All models overloaded — caller's withRetry will handle
-    throw lastErr[lastErr.length - 1];
-  }
-
-  private buildClassifierPrompt(ctx: WorkspaceContext, buffer: string): string {
-    return `You are a real-time voice intent classifier inside a VS Code extension called VTP.
-The developer speaks naturally while coding. Your job is to classify the intent AND extract
-the clean prompt content from every segment.
-
-INTENT TYPES:
-- PROMPT_CONTENT: Developer describing what to build/code. The DEFAULT — use when in doubt.
-- SEND: Developer wants to inject the prompt into the AI chat (e.g. "send it", "send the prompt").
-- ENHANCE: Developer wants Gemini to rewrite/elaborate the prompt (e.g. "enhance this", "elaborate").
-- COMMAND: Direct IDE/OS/terminal action — VERY RARE. Only for unmistakable IDE directives.
-- CANCEL: Developer wants to discard and restart (e.g. "cancel", "never mind").
-
-THE "content" FIELD — ALWAYS REQUIRED:
-Extract the meaningful prompt text from the segment. Remove:
-  - Filler words: "uh", "um", "like", "you know", "so", "well"
-  - Send trigger phrases: "send it", "send the prompt", "send this", "ok send", etc.
-  - Enhance trigger phrases: "enhance this", "elaborate", "improve", "make it better", etc.
-  - Cancel phrases: "cancel", "never mind", etc.
-  - IDE command phrases (for COMMAND intent): the action directive itself
-
-EXAMPLES:
-  Segment: "uh build a login page with Google OAuth, send the prompt"
-  → type: "SEND", content: "build a login page with Google OAuth"
-
-  Segment: "enhance this: add TypeScript strict mode to the auth module"
-  → type: "ENHANCE", content: "add TypeScript strict mode to the auth module"
-
-  Segment: "I want a dark mode toggle in the navbar"
-  → type: "PROMPT_CONTENT", content: "I want a dark mode toggle in the navbar"
-
-  Segment: "open the terminal"
-  → type: "COMMAND", content: "", commandIntent: "open the terminal"
-
-  Segment: "never mind start over"
-  → type: "CANCEL", content: ""
-
-CONSERVATIVE COMMAND RULES (all must be true):
-1. The action targets the IDE/OS itself, NOT the code being written.
-2. It is unmistakably an immediate action, not a feature to build.
-3. "make a save button" → PROMPT_CONTENT (building UI, not IDE action)
-4. "run the tests" / "open the terminal" / "git commit" → COMMAND
-
-Current workspace: ${ctx.workspaceName}
-Active file: ${ctx.activeFile?.path ?? 'none'}
-Accumulated buffer: "${buffer.slice(-200)}"
-
-Respond with JSON ONLY — no markdown:
-{
-  "type": "PROMPT_CONTENT" | "SEND" | "ENHANCE" | "COMMAND" | "CANCEL",
-  "content": "cleaned prompt text extracted from the segment (empty string if none)",
-  "commandIntent": "IDE action description (COMMAND only, else omit)"
-}`;
-  }
-
-  private parseResponse(raw: string, fallbackSegment: string): IntentResult {
-    try {
-      const cleaned = raw.replace(/```(?:json)?/g, '').trim();
-      const parsed = JSON.parse(cleaned);
-      const type = (['PROMPT_CONTENT', 'SEND', 'ENHANCE', 'COMMAND', 'CANCEL'].includes(parsed.type))
-        ? parsed.type
-        : 'PROMPT_CONTENT';
-      return {
-        type,
-        content: parsed.content ?? '',
-        commandIntent: parsed.commandIntent,
-      };
-    } catch {
-      return { type: 'PROMPT_CONTENT', content: fallbackSegment };
+    // ── Content with a trailing SEND/ENHANCE trigger ─────────────────────────
+    if (SEND_TAIL_RE.test(raw)) {
+      const content = this.cleanContent(raw.replace(SEND_TAIL_RE, ''));
+      return { type: 'SEND', content };
     }
+    if (ENHANCE_TAIL_RE.test(raw)) {
+      const content = this.cleanContent(raw.replace(ENHANCE_TAIL_RE, ''));
+      return { type: 'ENHANCE', content };
+    }
+
+    // ── Default: everything else is prompt content ───────────────────────────
+    return { type: 'PROMPT_CONTENT', content: this.cleanContent(raw) };
+  }
+
+  /** Light filler strip — keeps the wording, drops obvious noise. */
+  private cleanContent(text: string): string {
+    return text
+      .replace(FILLER_STRIP_RE, '')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/\s+([,.!?;:])/g, '$1')
+      .trim();
   }
 }

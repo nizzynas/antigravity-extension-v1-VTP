@@ -48,8 +48,29 @@ function readPkgVersion(pkgJsonPath: string): string {
   return JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8')).version;
 }
 
+/**
+ * Resolve the Claude Code dir that the *running* IDE loaded.
+ *
+ * The extension host knows this exactly, so ask it first — a filesystem scan
+ * can't tell which of several installed copies (or which of several IDE
+ * extension roots) is live, and patching a stale copy fails silently: the
+ * patch reports success but `claude-code.injectPromptVTP` never registers.
+ * Falls back to the scan when Claude Code isn't activated in this window.
+ */
+export function resolveExtDir(): string | null {
+  if (process.env.CLAUDE_CODE_EXT_DIR && fs.existsSync(process.env.CLAUDE_CODE_EXT_DIR)) {
+    return process.env.CLAUDE_CODE_EXT_DIR;
+  }
+  for (const id of ['anthropic.claude-code', 'Anthropic.claude-code']) {
+    const ext = vscode.extensions.getExtension(id);
+    const dir = ext?.extensionPath;
+    if (dir && fs.existsSync(path.join(dir, 'extension.js'))) return dir;
+  }
+  return findClaudeCodeExtDir();
+}
+
 export function getStatus(): PatchStatus {
-  const extDir = findClaudeCodeExtDir();
+  const extDir = resolveExtDir();
   if (!extDir) return { installed: false, extDir: null, version: null, patched: false };
   const f = extensionFiles(extDir);
   let version: string | null = null;

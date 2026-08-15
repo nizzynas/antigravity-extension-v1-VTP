@@ -1,8 +1,8 @@
 {
     "name": "vtp-voice-prompt",
     "displayName": "STP — Speech to Prompt",
-    "description": "STP (also known as VTP — Voice to Prompt) — hands-free voice assistant for Claude Code and Antigravity. Wake it with a phrase, dictate the prompt, send by voice. Auto-cleans filler words, optional Gemini enhancement, per-chat lock, focus-independent injection.",
-    "version": "1.1.1",
+    "description": "STP (also known as VTP — Voice to Prompt) — hands-free voice assistant for Claude Code and Antigravity. 100% local: on-device speech recognition (Vosk), no API key. Wake it with a phrase, dictate the prompt, send by voice. Auto-cleans filler words, optional local Ollama enhancement, per-chat lock, focus-independent injection.",
+    "version": "2.1.0",
     "icon": "media/icon.png",
     "publisher": "nizzynas",
     "license": "MIT",
@@ -75,8 +75,12 @@
                 "title": "VTP: Open Panel"
             },
             {
-                "command": "vtp.setApiKey",
-                "title": "VTP: Set Gemini API Key"
+                "command": "vtp.redownloadModel",
+                "title": "VTP: Re-download Speech Model"
+            },
+            {
+                "command": "vtp.openDebugLog",
+                "title": "VTP: Open Debug Log"
             },
             {
                 "command": "vtp.toggleRecording",
@@ -97,6 +101,11 @@
             {
                 "command": "vtp.claudeCodeStatus",
                 "title": "VTP: Show Claude Code Patch Status"
+            },
+            {
+                "command": "vtp.checkClaudeCode",
+                "title": "VTP: Check Claude Code Integration",
+                "category": "VTP"
             },
             {
                 "command": "vtp.lockClaudeConversation",
@@ -162,47 +171,29 @@
                     "default": 20,
                     "description": "Number of recent conversation messages to pass as context"
                 },
-                "vtp.elaborationModel": {
+                "vtp.enhancementModel": {
                     "type": "string",
-                    "default": "gemini-2.5-flash",
-                    "description": "Gemini model used for prompt elaboration"
+                    "default": "llama3.2",
+                    "description": "Local Ollama model tag used for prompt enhancement / heavy cleanup (e.g. 'llama3.2', 'qwen2.5:3b'). Only used if a local Ollama daemon is running on 127.0.0.1:11434. No API key; nothing leaves your machine."
                 },
-                "vtp.transcriptionEngine": {
+                "vtp.inputGateDb": {
+                    "type": "number",
+                    "default": -45,
+                    "minimum": -70,
+                    "maximum": -10,
+                    "description": "Input sensitivity, in dBFS. Audio quieter than this never reaches the speech recognizer, so background sound (game audio, music, speaker bleed into the mic) is not transcribed. Drag the marker on the input meter to set it by ear."
+                },
+                "vtp.inputGainDb": {
+                    "type": "number",
+                    "default": 0,
+                    "minimum": 0,
+                    "maximum": 30,
+                    "description": "Extra microphone gain in dB. Raise this if the input meter barely moves while you speak — speech should peak above -35 dBFS for reliable recognition."
+                },
+                "vtp.voskModelUrl": {
                     "type": "string",
-                    "enum": [
-                        "gemini",
-                        "deepgram"
-                    ],
-                    "enumDescriptions": [
-                        "Built-in Gemini chunked transcription (default, no extra setup required)",
-                        "Optional Deepgram real-time streaming (~300ms latency, requires free Deepgram API key)"
-                    ],
-                    "default": "gemini",
-                    "description": "Transcription engine. Deepgram is a 3rd-party optional service that significantly reduces transcription latency. Your Deepgram API key is stored only in VS Code SecretStorage on this machine."
-                },
-                "vtp.deepgramMipOptOut": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Opt out of the Deepgram Model Improvement Program. When true, Deepgram will not use your audio to train their models (mip_opt_out=true). The free-tier 50% MIP discount is removed when opted out. Managed via the Deepgram Privacy Settings menu."
-                },
-                "vtp.deepgramRedact": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": [
-                            "pci",
-                            "pii",
-                            "numbers",
-                            "ssn"
-                        ]
-                    },
-                    "default": [],
-                    "description": "Sensitive data types to redact from Deepgram transcripts. Redacted values are replaced with [redacted]. Options: pci (payment data), pii (names/addresses), numbers (all numerics), ssn (Social Security Numbers). Managed via the Deepgram Privacy Settings menu."
-                },
-                "vtp.deepgramProfanityFilter": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "When enabled, Deepgram replaces recognised profanity in the returned transcript with [censored]. Managed via the Deepgram Privacy Settings menu."
+                    "default": "https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip",
+                    "description": "URL of the Vosk speech model. Accepts a vosk-browser .tar.gz OR an alphacephei .zip (auto-converted on first run). Downloaded once to local storage, then used fully offline. Default is the ~130MB 'lgraph' model (accurate). For a smaller/faster download use https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz"
                 },
                 "vtp.voiceActivation.enabled": {
                     "type": "boolean",
@@ -222,10 +213,10 @@
                     ],
                     "enumDescriptions": [
                         "Send prompts to Antigravity's native chat (default).",
-                        "Send prompts to the Anthropic Claude Code extension chat. Requires running 'VTP: (Re-)apply Claude Code Patch' once, and forces the Deepgram transcription engine."
+                        "Send prompts to the Anthropic Claude Code extension chat. Requires running 'VTP: (Re-)apply Claude Code Patch' once."
                     ],
                     "default": "antigravity",
-                    "description": "Where VTP routes injected prompts. Switching to Claude Code automatically enforces the Deepgram engine for low-latency voice commands."
+                    "description": "Where VTP routes injected prompts."
                 },
                 "vtp.claudeCodeLockedTitle": {
                     "type": "string",
@@ -236,12 +227,13 @@
         }
     },
     "scripts": {
-        "build": "webpack --mode production",
+        "build": "npm run stage && webpack --mode production",
         "watch": "webpack --watch --mode development",
-        "package": "vsce package --out vtp-voice-prompt.vsix",
-        "compile": "webpack --mode production && tsc --noEmit",
+        "package": "npm run build && vsce package --out vtp-voice-prompt.vsix",
+        "compile": "npm run stage && webpack --mode production && tsc --noEmit",
         "typecheck": "tsc --noEmit",
-        "release": "npm run build && vsce package --out vtp-voice-prompt.vsix && vsce publish --packagePath vtp-voice-prompt.vsix && ovsx publish vtp-voice-prompt.vsix -p %OVSX_TOKEN%"
+        "release": "npm run package && vsce publish --packagePath vtp-voice-prompt.vsix && ovsx publish vtp-voice-prompt.vsix -p %OVSX_TOKEN%",
+        "stage": "node tools/stage-media.js"
     },
     "devDependencies": {
         "@types/node": "^20.0.0",
@@ -249,10 +241,12 @@
         "@vscode/vsce": "^2.24.0",
         "ts-loader": "^9.5.1",
         "typescript": "^5.3.0",
+        "vosk-browser": "^0.0.8",
         "webpack": "^5.90.0",
         "webpack-cli": "^5.1.4"
     },
     "dependencies": {
-        "@google/generative-ai": "^0.21.0"
+        "adm-zip": "^0.5.18",
+        "tar": "^7.5.19"
     }
 }

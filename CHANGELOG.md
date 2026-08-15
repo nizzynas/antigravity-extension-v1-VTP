@@ -4,6 +4,24 @@ All notable changes to STP — Speech to Prompt are documented here.
 
 ---
 
+## [2.1.0] — 2026-08-15
+### Added
+- **Speech recognition runs on this machine** — Vosk in the panel webview, no API key and no audio leaving the computer. Deepgram, the key prompt and the secret storage that held it are gone. The model is downloaded once on first run and used offline after that.
+- **A way in from outside the editor** — another program can hand a prompt to an open Claude conversation by leaving a file in `%APPDATA%\VTP\inbox`. An answer is written beside it saying what happened, so the caller can tell delivery from silence. Built for Hangar, which uses it to put a spoken note into the chat you are looking at.
+- **`VTP: Check Claude Code Integration`** — and a `%APPDATA%\VTP\health.json` written on every activation: which Claude Code is live, the state of each patch anchor by name, and whether the commands actually registered in this window. That last one is a separate question from whether the files are patched, and it is the one that was never being asked.
+- **Patching keeps up with Claude Code updating itself** — the extension folders are watched, a new version is patched within seconds of arriving, and the reload is offered rather than left for you to work out.
+
+### Fixed
+- **The integration was dead after Claude Code 2.1.233 and nothing said so.** The handler inserted into the webview read a variable named `$` — what the minifier called it in 2.1.126. In 2.1.233 it is `e`, so the inserted code threw into its own `try`/`catch` and did nothing, while the patch reported applied, the files held the right code, and the command dispatched. Names are now read out of the file rather than assumed. Schema v9.
+- **Panel tagging broke on 2.1.232 for the same reason** — the panel used to be named in a message handler that followed the registration; now it is named in an object literal. One anchor matches both shapes.
+- **The patch status check answered differently every other time it was asked** — it tested a `/g` regex, which remembers where it stopped, so a healthy patch read as broken on the second look.
+- **Handing over to a conversation name that matched nothing reported success** — a dispatch to no panels looks exactly like a delivery. It now checks which conversations are open, refuses when none match, and says which ones there are.
+
+### Changed
+- **The 5.6MB speech engine is no longer committed.** It is `vosk-browser`'s own build, byte for byte, and that package is already a dependency — so `npm run build` copies it into `media/vendor/` instead of the repository carrying it forever. The packaged extension is unchanged: `.vscodeignore` governs what ships, and the engine is still inside the `.vsix`.
+
+---
+
 ## [1.1.1] — 2026-05-22
 ### Added
 - **Auto-patch on activation** — `ensurePatched()` runs on extension startup and idempotently injects the VTP IPC bridge into Claude Code's `extension.js` / `webview/index.js`. Detects Claude Code version changes and re-applies cleanly. Originals are backed up under `.vtp-backups/` and a `.vtp-patched.json` marker records the schema version so stale patches trigger an auto-restore + re-apply.

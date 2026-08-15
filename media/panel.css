@@ -340,6 +340,125 @@ button.context-card.context-claude.context-locked .context-workspace {
   background: var(--success);
 }
 
+/* ─── Mic input meter ────────────────────────────────────────────────── */
+
+.mic-meter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 200ms var(--ease);
+}
+
+.mic-meter-icon {
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+
+.mic-meter-track {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  min-width: 40px;
+  border-radius: 4px;
+  overflow: hidden;
+  /* Full-width gradient sits underneath; the mask hides the unfilled part, so
+     colours stay pinned to their position on the scale (Discord-style). */
+  background: linear-gradient(90deg,
+              var(--success) 0%, var(--success) 55%,
+              var(--warn) 78%, var(--danger) 100%);
+}
+
+.mic-meter-mask {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  background: rgba(127, 127, 127, 0.18);
+  transition: width 90ms linear;
+}
+
+.mic-meter-peak {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  opacity: 0.8;
+  transition: left 90ms linear;
+}
+
+/* Sensitivity marker — drag it to the point where your voice clears the noise. */
+.mic-meter-gate {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 3px;
+  margin-left: -1.5px;
+  border-radius: 2px;
+  background: var(--text);
+  box-shadow: 0 0 0 1px var(--surface);
+  cursor: ew-resize;
+}
+
+.mic-meter-track { cursor: ew-resize; }
+
+/* Everything below the threshold is dimmed — that audio is being discarded. */
+.mic-meter-track::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--gate-pos, 0%);
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.mic-meter-label {
+  flex-shrink: 0;
+  max-width: 46%;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Idle — greyed out, nothing streaming. */
+.mic-meter.is-off .mic-meter-track { filter: grayscale(1); opacity: 0.45; }
+.mic-meter.is-off .mic-meter-icon  { opacity: 0.4; }
+
+/* Audio flowing. */
+.mic-meter.is-live { border-color: rgba(158, 206, 106, 0.3); }
+.mic-meter.is-live .mic-meter-label { color: var(--success); }
+
+/* Streaming, but the level never leaves the floor. */
+.mic-meter.is-quiet { border-color: rgba(224, 175, 104, 0.45); }
+.mic-meter.is-quiet .mic-meter-label { color: var(--warn); }
+
+/* Sound present, but under the threshold — deliberately discarded. */
+.mic-meter.is-gated .mic-meter-label { color: var(--muted); }
+
+/* Audio is fine — the recognizer is the one producing nothing. */
+.mic-meter.is-nostt { border-color: rgba(124, 106, 247, 0.45); }
+.mic-meter.is-nostt .mic-meter-label { color: var(--accent); }
+
+/* FFmpeg opened but no bytes at all — dead/blocked device. */
+.mic-meter.is-dead { border-color: rgba(247, 118, 142, 0.55); }
+.mic-meter.is-dead .mic-meter-label {
+  color: var(--danger);
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
 /* ─── Record button ──────────────────────────────────────────────────── */
 
 .record-area {
@@ -402,7 +521,85 @@ button.context-card.context-claude.context-locked .context-workspace {
   color: var(--muted);
 }
 
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.btn-clear {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 9.5px;
+  letter-spacing: 0.4px;
+  padding: 1px 7px;
+  transition: border-color 150ms var(--ease), color 150ms var(--ease),
+              background 150ms var(--ease);
+}
+
+.btn-clear:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: rgba(247, 118, 142, 0.08);
+}
+
 .hidden { display: none !important; }
+
+/* ── Fully-local build additions ─────────────────────────────────────────── */
+.vtp-brand-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  border-radius: 6px;
+  background: rgba(120, 200, 120, 0.18);
+  color: #7ec87e;
+  vertical-align: middle;
+}
+.model-banner {
+  margin: 6px 10px 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+  background: rgba(120, 160, 220, 0.14);
+  color: var(--vscode-foreground);
+  text-align: center;
+}
+.ob-local-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 18px 0 24px;
+  text-align: left;
+}
+.ob-fact {
+  font-size: 13px;
+  opacity: 0.9;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.10);
+}
+.vtp-debug {
+  margin: 6px 10px 0;
+  padding: 8px 10px;
+  max-height: 160px;
+  overflow: auto;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10.5px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #d7ba7d;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(215, 186, 125, 0.35);
+  border-radius: 8px;
+}
 
 /* ─── Transcript ─────────────────────────────────────────────────────── */
 

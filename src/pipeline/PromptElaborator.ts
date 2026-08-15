@@ -1,18 +1,27 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { WorkspaceContext, MatchedConversation } from '../types';
+import { OllamaClient } from './OllamaClient';
+
+/** Thrown when enhancement is requested but no local LLM is available. */
+export class NoLocalModelError extends Error {
+  constructor() {
+    super('Enhancement needs a local LLM. Install Ollama (ollama.com) and pull a model, e.g. `ollama pull llama3.2`. Until then VTP will send your cleaned dictation as-is.');
+    this.name = 'NoLocalModelError';
+  }
+}
 
 /**
- * Takes the accumulated prompt buffer + full context and calls Gemini
- * to produce a clean, detailed, codebase-aware prompt for Antigravity.
+ * Takes the accumulated prompt buffer + workspace/conversation context and asks
+ * a LOCAL Ollama model to produce a clean, detailed, codebase-aware prompt.
  *
- * Also handles filler word removal from the raw voice transcript.
+ * Fully local — no API key, nothing leaves the machine. If Ollama is not
+ * running (or has no models), elaborate() throws NoLocalModelError and the
+ * caller falls back to sending the raw/cleaned buffer.
  */
 export class PromptElaborator {
-  private readonly model;
+  private readonly ollama: OllamaClient;
 
-  constructor(apiKey: string, modelName = 'gemini-2.5-flash') {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    this.model = genAI.getGenerativeModel({ model: modelName });
+  constructor(model = 'llama3.2') {
+    this.ollama = new OllamaClient(model);
   }
 
   async elaborate(
@@ -20,9 +29,18 @@ export class PromptElaborator {
     workspace: WorkspaceContext,
     conversation: MatchedConversation | null,
   ): Promise<string> {
+    if (!(await this.ollama.isAvailable())) {
+      throw new NoLocalModelError();
+    }
     const prompt = this.buildPrompt(promptBuffer, workspace, conversation);
-    const result = await this.model.generateContent(prompt);
-    return result.response.text().trim();
+    const out = await this.ollama.generate(prompt, {
+      system:
+        'You are an expert prompt engineer embedded in a code editor. ' +
+        'Output ONLY the final prompt — no preamble, no commentary, no markdown headers.',
+      temperature: 0.2,
+      timeoutMs: 45_000,
+    });
+    return out.trim();
   }
 
   private buildPrompt(
@@ -54,8 +72,7 @@ ${ws.activeFile.content}
 ${conv.messages.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n')}`
       : 'No matched conversation history.';
 
-    return `You are an expert prompt engineer embedded inside a VS Code extension.
-A developer dictated rough voice notes. Your tasks:
+    return `A developer dictated rough voice notes. Your tasks:
 1. Remove all filler words (um, uh, like, you know, etc.) and false starts
 2. Use the workspace and conversation context to make the prompt precise and specific
 3. Reference actual file names, function names, and patterns present in the codebase
@@ -74,7 +91,7 @@ ${gitSection}
 Package info:
 ${ws.projectMeta || 'Not available'}
 
-=== RECENT ANTIGRAVITY CONVERSATION ===
+=== RECENT CONVERSATION ===
 ${conversationSection}
 
 === DEVELOPER'S VOICE NOTES (raw) ===
