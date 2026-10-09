@@ -62,8 +62,6 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  // ── Claude Code integration commands ────────────────────────────────────────
-
   context.subscriptions.push(
     vscode.commands.registerCommand('vtp.switchTarget', async () => {
       const cfg = vscode.workspace.getConfiguration('vtp');
@@ -192,24 +190,14 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  // Auto-patch on startup (idempotent, throws only on anchor mismatch)
   ensurePatched((m) => logger.appendLine(m))
     .catch((e) => {
       logger.appendLine(`[VTP] auto-patch error: ${e?.message ?? e}`);
     })
-    // Then say whether it actually worked, rather than whether it ran. An
-    // update that moves one anchor leaves a patch that applied, a marker that
-    // looks right and a feature that silently does nothing; this is the only
-    // line in the log that knows the difference.
     .then(() => checkHealth())
     .then((h) => {
       logger.appendLine(`[VTP] ${describeHealth(h)}`);
       for (const w of h.wrong) logger.appendLine(`[VTP]   ${w}`);
-      // Said out loud only when it is broken, and the offer matches the
-      // reason. Files patched but the command missing means this window
-      // started before the patch and only a reload fixes it — offering
-      // "re-apply" there patches an already-patched file and changes nothing,
-      // which is how you conclude the thing is simply broken.
       if (!h.working && h.claudeCode.dir) {
         const filesFine = Object.values(h.patches).every((s) => s === 'applied');
         if (filesFine && !h.commands.inject) {
@@ -221,19 +209,15 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
     })
-    .catch(() => { /* the check must never be the thing that breaks activation */ });
+    .catch(() => {});
 
-  // The way in for anything outside the IDE — Hangar handing over a note.
   const inbox = new Inbox((m) => logger.appendLine(m));
   inbox.start();
   context.subscriptions.push({ dispose: () => inbox.dispose() });
 
-  // Claude Code updates itself while a window is open, so patching only at
-  // activation leaves every window one version behind for good.
   keep.start();
   context.subscriptions.push({ dispose: () => keep.dispose() });
 
-  // Refresh the panel's target card when the injection target / lock changes.
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((evt) => {
       if (evt.affectsConfiguration('vtp.injectionTarget') || evt.affectsConfiguration('vtp.claudeCodeLockedTitle')) {

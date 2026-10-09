@@ -1,15 +1,3 @@
-/**
- * VoskModelManager — owns the local Vosk speech model.
- *
- * vosk-browser loads a gzipped tar of a model folder. The bigger/better English
- * models are published as .zip (alphacephei), so when the configured URL is a
- * .zip we download it once, extract it, and repack it as .tar.gz. Everything is
- * cached in globalStorage and reused offline thereafter.
- *
- * The final .tar.gz bytes are streamed to the webview over postMessage (the
- * webview can't fetch a large globalStorage resource reliably in Antigravity).
- */
-
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -21,8 +9,6 @@ const AdmZip = require('adm-zip');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const tar = require('tar');
 
-// Default: the medium "lgraph" English model (~130 MB zip) — markedly more
-// accurate + noise-robust than the small model, still viable in WASM.
 const DEFAULT_MODEL_URL =
   'https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip';
 
@@ -41,13 +27,11 @@ export class VoskModelManager {
       .get<string>('voskModelUrl', DEFAULT_MODEL_URL) || DEFAULT_MODEL_URL;
   }
 
-  /** The base model name (no extension), derived from the configured URL. */
   private get modelName(): string {
     const base = this.modelUrl.split('/').pop() || 'vosk-model';
     return base.replace(/\.(zip|tar\.gz|tgz)$/i, '');
   }
 
-  /** Absolute path to the cached, ready-to-load .tar.gz. */
   get modelPath(): string {
     return path.join(this.storageUri.fsPath, this.modelName + '.tar.gz');
   }
@@ -64,10 +48,6 @@ export class VoskModelManager {
     try { await fs.promises.unlink(this.modelPath); } catch {}
   }
 
-  /**
-   * Ensure the model .tar.gz is present, downloading (and converting a .zip)
-   * once if needed.
-   */
   async ensureModel(onProgress?: ProgressFn, onStatus?: StatusFn): Promise<void> {
     if (this.isCached()) {
       this.log(`[Vosk] Using cached model at ${this.modelPath}`);
@@ -82,7 +62,6 @@ export class VoskModelManager {
       onStatus?.('Extracting model…');
       await this.convertZipToTarGz(buf);
     } else {
-      // Already a tar.gz — just cache it.
       const tmp = this.modelPath + '.part';
       await fs.promises.writeFile(tmp, buf);
       await fs.promises.rename(tmp, this.modelPath);
@@ -90,7 +69,6 @@ export class VoskModelManager {
     this.log(`[Vosk] Model ready at ${this.modelPath} (${fs.statSync(this.modelPath).size} bytes)`);
   }
 
-  /** Extract a Vosk model .zip (in memory) and repack it as gzipped tar. */
   private async convertZipToTarGz(zipBytes: Buffer): Promise<void> {
     const workDir = path.join(os.tmpdir(), `vtp-vosk-${this.modelName}`);
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch {}
@@ -100,7 +78,6 @@ export class VoskModelManager {
     const zip = new AdmZip(zipBytes);
     zip.extractAllTo(workDir, true);
 
-    // Find the single top-level model directory the zip produced.
     const entries = fs.readdirSync(workDir, { withFileTypes: true });
     const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
     const root = dirs.includes(this.modelName) ? this.modelName : dirs[0];

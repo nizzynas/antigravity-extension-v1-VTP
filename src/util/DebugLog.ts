@@ -3,27 +3,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-/**
- * TeeChannel — the VTP Output channel, mirrored to a file on disk.
- *
- * The Output panel can only be read inside the IDE, which makes "what happened
- * while you were trying it" impossible to answer after the fact. Everything
- * written here also lands, timestamped, in ~/.vtp/vtp-debug.log, so a session
- * can be read (or tailed live) from a terminal.
- *
- * Writes are synchronous on purpose: a hang or a force-quit must not swallow
- * the last few lines, which are usually the interesting ones.
- */
 export class TeeChannel implements vscode.OutputChannel {
   static readonly logPath = path.join(os.homedir(), '.vtp', 'vtp-debug.log');
 
-  /** Cleared once the file turns out to be unwritable, so we stop retrying. */
   private mirroring = true;
 
   constructor(private readonly inner: vscode.OutputChannel) {
     try {
       fs.mkdirSync(path.dirname(TeeChannel.logPath), { recursive: true });
-      // Start each session clean — stale runs only make the trail harder to read.
       fs.writeFileSync(TeeChannel.logPath, '');
     } catch {
       this.mirroring = false;

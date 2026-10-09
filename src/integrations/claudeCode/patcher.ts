@@ -1,13 +1,3 @@
-/**
- * Patcher orchestration — apply, restore, and status-check the Claude Code
- * hot-patch from inside the extension.
- *
- * Public surface:
- *   ensurePatched()    — verify+apply on extension activation, idempotent.
- *   restoreOriginal()  — roll back to the most recent backup.
- *   getStatus()        — quick status report for UI/diagnostics.
- */
-
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -22,13 +12,11 @@ export interface PatchStatus {
   version: string | null;
   patched: boolean;
   marker?: PatchMarker;
-  /** True when the marker exists but its patchSchemaVersion is older than current. */
   schemaOutdated?: boolean;
 }
 
 export interface PatchMarker {
   version: string;
-  /** Patch schema version written at apply time. Used to detect stale patches. */
   patchSchemaVersion?: number;
   appliedAt: string;
   backupDir: string;
@@ -48,15 +36,6 @@ function readPkgVersion(pkgJsonPath: string): string {
   return JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8')).version;
 }
 
-/**
- * Resolve the Claude Code dir that the *running* IDE loaded.
- *
- * The extension host knows this exactly, so ask it first — a filesystem scan
- * can't tell which of several installed copies (or which of several IDE
- * extension roots) is live, and patching a stale copy fails silently: the
- * patch reports success but `claude-code.injectPromptVTP` never registers.
- * Falls back to the scan when Claude Code isn't activated in this window.
- */
 export function resolveExtDir(): string | null {
   if (process.env.CLAUDE_CODE_EXT_DIR && fs.existsSync(process.env.CLAUDE_CODE_EXT_DIR)) {
     return process.env.CLAUDE_CODE_EXT_DIR;
@@ -74,14 +53,13 @@ export function getStatus(): PatchStatus {
   if (!extDir) return { installed: false, extDir: null, version: null, patched: false };
   const f = extensionFiles(extDir);
   let version: string | null = null;
-  try { version = readPkgVersion(f.pkgJson); } catch { /* ignore */ }
+  try { version = readPkgVersion(f.pkgJson); } catch {}
   let marker: PatchMarker | undefined;
   let patched = false;
   let schemaOutdated = false;
   if (fs.existsSync(f.marker)) {
     try {
       marker = JSON.parse(fs.readFileSync(f.marker, 'utf-8'));
-      // Verify all regex patches still present (matches the CURRENT schema)
       const extJs = fs.readFileSync(f.extJs, 'utf-8');
       const wvJs  = fs.readFileSync(f.wvJs,  'utf-8');
       patched = Object.values(PATCHES).every((p) => {
@@ -90,33 +68,11 @@ export function getStatus(): PatchStatus {
         return patchStatus(content, p) === 'applied';
       });
       schemaOutdated = (marker?.patchSchemaVersion ?? 1) < PATCH_SCHEMA_VERSION;
-    } catch { /* ignore */ }
+    } catch {}
   }
   return { installed: true, extDir, version, patched, marker, schemaOutdated };
 }
 
-/**
- * Apply patches if needed. Returns true if a patch was applied this call.
- *
- * Behaviour:
- *   - No Claude Code installed → no-op, returns false.
- *   - Already patched + same version + all anchors verified → no-op, returns false.
- *   - Marker for old version → re-apply, returns true.
- *   - First-time → apply + create backup, returns true.
- */
-/**
- * One window patches at a time.
- *
- * An extension host runs per window, so ten editors open means ten copies of
- * this, and they all wake up to the same new Claude Code at the same moment.
- * Ten processes rewriting one extension.js is not ten times the work, it is a
- * corrupted file — and the backup taken by the second one is a copy of what
- * the first was halfway through writing.
- *
- * A file nobody else can create while it exists. Left behind by a crash it
- * would block patching forever, so one older than a couple of minutes is
- * treated as abandoned — no patch takes anywhere near that long.
- */
 const LOCK_STALE_MS = 120_000;
 
 function takeLock(extDir: string, log: (m: string) => void): (() => void) | null {
@@ -127,15 +83,14 @@ function takeLock(extDir: string, log: (m: string) => void): (() => void) | null
       log(`[VTP/claude-code] clearing a lock left behind ${Math.round(age / 1000)}s ago`);
       fs.unlinkSync(lock);
     }
-  } catch { /* no lock, which is the usual case */ }
+  } catch {}
 
   try {
-    // wx fails if it is already there, which is the whole point.
     fs.writeFileSync(lock, String(process.pid), { flag: 'wx' });
   } catch {
-    return null;                     // another window is doing it
+    return null;
   }
-  return () => { try { fs.unlinkSync(lock); } catch { /* gone */ } };
+  return () => { try { fs.unlinkSync(lock); } catch {} };
 }
 
 export async function ensurePatched(log?: (m: string) => void): Promise<boolean> {
@@ -147,8 +102,6 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
     return false;
   }
 
-  // Detect three reasons to re-apply: Claude version changed, our patch schema
-  // changed, or marker exists but patches no longer all match (e.g. partial state).
   const versionChanged = status.marker && status.marker.version !== status.version;
   const schemaChanged  = status.schemaOutdated === true;
   const partialPatch   = status.marker && !status.patched;
@@ -158,7 +111,6 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
     return false;
   }
 
-  // Past here the files get rewritten, so only one window may proceed.
   const release = takeLock(status.extDir, _log);
   if (!release) {
     _log('[VTP/claude-code] another window is patching — leaving it to that one');
@@ -175,13 +127,12 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
   }
 
   if (versionChanged || schemaChanged || partialPatch) {
-    try { await restoreOriginal(_log); } catch { /* proceed even if restore fails */ }
+    try { await restoreOriginal(_log); } catch {}
   }
 
   const f = extensionFiles(status.extDir);
   const version = status.version!;
 
-  // Verify anchors before touching anything
   const origExtJs = fs.readFileSync(f.extJs, 'utf-8');
   const origWvJs  = fs.readFileSync(f.wvJs,  'utf-8');
   const origPkg   = fs.readFileSync(f.pkgJson, 'utf-8');
@@ -197,7 +148,6 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
     throw new Error(`VTP patch anchors missing for Claude Code v${version}: ${broken.join(', ')}`);
   }
 
-  // Backup
   const backupSubdir = path.join(f.backupDir, ts());
   fs.mkdirSync(path.join(backupSubdir, 'webview'), { recursive: true });
   fs.copyFileSync(f.extJs,   path.join(backupSubdir, 'extension.js'));
@@ -205,20 +155,16 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
   fs.copyFileSync(f.pkgJson, path.join(backupSubdir, 'package.json'));
   _log(`[VTP/claude-code] backup → ${backupSubdir}`);
 
-  // Apply regex patches
   const { extJs, wvJs } = applyPatches(f);
   fs.writeFileSync(f.extJs, extJs, 'utf-8');
   fs.writeFileSync(f.wvJs,  wvJs,  'utf-8');
 
-  // Apply pkgJson edit
   const pkgPatch = patchPackageJson(f);
   if (pkgPatch.changed) fs.writeFileSync(f.pkgJson, pkgPatch.content, 'utf-8');
 
-  // Validate package.json still parses
   try { JSON.parse(fs.readFileSync(f.pkgJson, 'utf-8')); }
   catch (e: any) { throw new Error('package.json invalid after patch: ' + e.message); }
 
-  // Marker
   const marker: PatchMarker = {
     version,
     patchSchemaVersion: PATCH_SCHEMA_VERSION,
@@ -237,10 +183,6 @@ export async function ensurePatched(log?: (m: string) => void): Promise<boolean>
   }
 }
 
-/**
- * Restore Claude Code to its pre-VTP state by copying the most recent backup
- * over the current files and removing the patch marker.
- */
 export async function restoreOriginal(log?: (m: string) => void): Promise<boolean> {
   const _log = log ?? (() => {});
   const status = getStatus();
