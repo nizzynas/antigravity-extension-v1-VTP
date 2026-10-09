@@ -1,11 +1,3 @@
-/**
- * SettingsManager — lightweight info/help flows for the fully-local build.
- *
- * VTP no longer uses any API key: speech-to-text runs locally via Vosk (WASM)
- * and optional prompt enhancement uses a local Ollama model. These handlers just
- * surface guidance; there are no secrets to manage.
- */
-
 import * as vscode from 'vscode';
 import type { ExtensionMessage } from '../types';
 
@@ -17,7 +9,6 @@ export interface SettingsManagerDeps {
 export class SettingsManager {
   constructor(private deps: SettingsManagerDeps) {}
 
-  /** Header ⚙/ℹ affordance — explain the local setup + optional Ollama. */
   async handleOpenSettings(): Promise<void> {
     const action = await vscode.window.showInformationMessage(
       'VTP runs fully locally — no API key needed. Speech is transcribed on-device with Vosk. ' +

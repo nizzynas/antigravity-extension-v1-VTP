@@ -1,35 +1,21 @@
-/**
- * OllamaClient — optional local LLM used for prompt enhancement / heavy cleanup.
- *
- * Ollama is a fully-local model runner (https://ollama.com). It exposes an HTTP
- * API on 127.0.0.1:11434 and requires NO API key. VTP uses it ONLY when it is
- * already running on the machine; if it is absent, every caller falls back to a
- * pure-regex local pass. Nothing is ever sent off the machine.
- */
-
 import * as http from 'http';
 
 const OLLAMA_HOST = '127.0.0.1';
 const OLLAMA_PORT = 11434;
 
 export interface OllamaGenerateOptions {
-  /** System instruction prepended to the model context. */
   system?: string;
-  /** Sampling temperature. Defaults to 0 for deterministic rewrites. */
   temperature?: number;
-  /** Hard timeout in ms. Defaults to 20s. */
   timeoutMs?: number;
 }
 
 export class OllamaClient {
   constructor(
-    /** Model tag to use, e.g. "llama3.2", "qwen2.5:3b". */
     private readonly model: string,
     private readonly host: string = OLLAMA_HOST,
     private readonly port: number = OLLAMA_PORT,
   ) {}
 
-  /** Low-level POST helper against the local Ollama daemon. */
   private request(path: string, body: unknown, timeoutMs = 20_000): Promise<any> {
     const payload = Buffer.from(JSON.stringify(body));
     return new Promise((resolve, reject) => {
@@ -69,7 +55,6 @@ export class OllamaClient {
     });
   }
 
-  /** GET helper (used for availability / model list). */
   private get(path: string, timeoutMs = 2_000): Promise<any> {
     return new Promise((resolve, reject) => {
       const req = http.request(
@@ -89,10 +74,6 @@ export class OllamaClient {
     });
   }
 
-  /**
-   * True if a local Ollama daemon is reachable AND has at least one model.
-   * Fast (2s timeout) so callers can gate cheaply on every use.
-   */
   async isAvailable(): Promise<boolean> {
     try {
       const tags = await this.get('/api/tags');
@@ -102,7 +83,6 @@ export class OllamaClient {
     }
   }
 
-  /** Returns installed model tags, or [] if the daemon is unreachable. */
   async listModels(): Promise<string[]> {
     try {
       const tags = await this.get('/api/tags');
@@ -112,11 +92,6 @@ export class OllamaClient {
     }
   }
 
-  /**
-   * Single-shot generation. Returns the trimmed completion text.
-   * Throws if the daemon is unreachable or the model is missing — callers
-   * are expected to catch and fall back to a local regex pass.
-   */
   async generate(prompt: string, opts: OllamaGenerateOptions = {}): Promise<string> {
     const res = await this.request(
       '/api/generate',

@@ -1,18 +1,3 @@
-/**
- * GlobalHotkey — stub.
- *
- * Global hotkey is handled by VS Code's native keybinding system via the
- * `contributes.keybindings` entry in package.json (default: Ctrl+Shift+Space).
- *
- * Users can remap it via:
- *   Keyboard Shortcuts editor → search "VTP: Toggle Recording"
- *   (Ctrl+K Ctrl+S to open)
- *
- * The native node-global-key-listener approach was removed because it
- * requires platform-specific binaries that conflict with VS Code's
- * security sandbox (spawn UNKNOWN on Windows).
- */
-
 import * as vscode from 'vscode';
 
 export interface GlobalHotkeyDeps {
@@ -32,5 +17,5 @@ export class GlobalHotkey {
     );
   }
 
-  dispose(): void { /* nothing to clean up */ }
+  dispose(): void {}
 }

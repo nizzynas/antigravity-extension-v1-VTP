@@ -1,13 +1,4 @@
 // @ts-nocheck
-/**
- * workerHook.js — MUST load before vosk.js.
- *
- * vosk-browser runs its WASM inside a blob Worker. If that worker dies (WASM
- * blocked by CSP, blob fetch denied, etc.) the error fires on the WORKER, not
- * the page, so nothing surfaces and createModel just hangs. We monkey-patch
- * Worker so every worker created (including Vosk's) reports its errors into a
- * global buffer that panel.js drains into the on-panel diagnostics strip.
- */
 (function () {
   const Orig = window.Worker;
   if (!Orig) return;
@@ -26,7 +17,7 @@
         buf.push('worker error: ' + (ev.message || '(no message — often CSP/WASM)') + ' @ ' + where);
       });
       w.addEventListener('messageerror', function () { buf.push('worker messageerror (clone failed)'); });
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
     return w;
   }
   Patched.prototype = Orig.prototype;

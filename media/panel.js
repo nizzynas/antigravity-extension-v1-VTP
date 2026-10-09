@@ -1,17 +1,7 @@
 // @ts-nocheck
-/**
- * VTP Webview Panel — fully local.
- *
- * Speech-to-text runs right here via Vosk (WASM, see voskCapture.js). The host
- * drives capture with micStart/micStop messages and receives transcripts back;
- * all pipeline logic (triggers, intent, cleanup, enhancement, injection) is in
- * the extension host. No API key, no cloud.
- */
 (function () {
   const vscode = acquireVsCodeApi();
 
-  // ── Diagnostics — surface webview-side failures both in the VTP Output
-  //    channel AND in an on-panel strip so they can be seen at a glance. ──
   const _dbgEl = document.getElementById('vtp-debug');
   const _dbgLines = [];
   function dbg(text) {
@@ -35,22 +25,17 @@
   document.addEventListener('securitypolicyviolation', (e) => {
     post({ type: 'log', message: '[CSP BLOCKED] ' + e.violatedDirective + ' → ' + (e.blockedURI || e.sourceFile || '') });
   });
-  // Send boot facts to the host too, so they land in the debug log file rather
-  // than only in the on-panel strip nobody can read after the fact.
   post({ type: 'log', message: '[panel] booted · WASM=' + (typeof WebAssembly !== 'undefined') +
         ' Worker=' + (typeof Worker !== 'undefined') + ' Vosk=' + (typeof window.Vosk !== 'undefined') });
 
-  // Drain worker errors captured by workerHook.js (Vosk's WASM worker failures).
   setInterval(() => {
     const q = window.__vtpWorkerErrors;
     if (q && q.length) { while (q.length) post({ type: 'log', message: '[WORKER] ' + q.shift() }); }
   }, 500);
 
-  // Local STT controller (defined in voskCapture.js).
   const vosk = window.__initVosk ? window.__initVosk(post) : null;
   if (!vosk) { post({ type: 'log', message: '[panel] voskCapture failed to init — window.__initVosk missing' }); }
 
-  // ─── DOM refs ──────────────────────────────────────────────────────────────
   const statusBar        = document.getElementById('status-bar');
   const statusText       = document.getElementById('status-text');
   const contextWorkspace = document.getElementById('context-workspace');
@@ -86,7 +71,6 @@
   const micMeterGate     = document.getElementById('mic-meter-gate');
   const micMeterLabel    = document.getElementById('mic-meter-label');
 
-  // Onboarding
   const obOverlay        = document.getElementById('onboarding-overlay');
   const obScreen1        = document.getElementById('ob-screen-1');
   const obScreen2        = document.getElementById('ob-screen-2');
@@ -98,7 +82,6 @@
   const obWakeInput      = document.getElementById('ob-wake-input');
   const obFinish         = document.getElementById('ob-finish');
 
-  // Settings panel
   const settingsPanel     = document.getElementById('settings-panel');
   const settingsClose     = document.getElementById('settings-close');
   const settingsSave      = document.getElementById('settings-save');
@@ -109,7 +92,6 @@
   const scContinuous      = document.getElementById('sc-continuous');
   const scPause           = document.getElementById('sc-pause');
 
-  // ─── State ─────────────────────────────────────────────────────────────────
   let isRecording   = false;
   let isPaused      = false;
   let activationMode = 'wake';
@@ -122,7 +104,6 @@
   let modelReady = false;
   let _modelChunks = [];
 
-  // Decode one base64 chunk into a Uint8Array.
   function _b64ToBytes(b64) {
     const bin = atob(b64);
     const len = bin.length;
@@ -135,7 +116,6 @@
     document.querySelectorAll('.vc-wake').forEach(el => { el.textContent = phrase || 'hey antigravity'; });
   }
 
-  // ─── Transcript rendering ──────────────────────────────────────────────────
   function renderTranscript(text) {
     if (text) {
       transcriptBox.innerHTML = text;
@@ -146,7 +126,6 @@
     }
   }
 
-  // ─── Animated dots ──────────────────────────────────────────────────────────
   let dotTimer = null;
   const DOT_FRAMES = ['Listening', 'Listening.', 'Listening..', 'Listening...'];
   let dotFrame = 0;
@@ -248,39 +227,32 @@
     post({ type: 'cancel' });
   }
 
-  // ─── Model banner ────────────────────────────────────────────────────────────
   function showBanner(text) { modelBannerText.textContent = text; modelBanner.classList.remove('hidden'); }
   function hideBanner() { modelBanner.classList.add('hidden'); }
 
-  // ─── Mic input meter ─────────────────────────────────────────────────────────
-  // The host measures the same PCM it feeds to Vosk and pushes a level ~10×/sec.
-  // A moving bar means audio is definitely reaching the recognizer, so anything
-  // still missing after that is a transcription problem, not a mic problem.
-  const METER_FLOOR_DB = -60;      // bottom of the visible scale
-  const SPEECH_RMS     = 0.005;    // ≈ -46 dBFS — loud enough for Vosk
-  const SILENT_RMS     = 0.0003;   // ≈ -70 dBFS — nothing but digital silence
-  const QUIET_TICKS    = 30;       // 3s below SPEECH_RMS before we complain
-  const STT_SILENT_MS  = 6000;     // audio present this long with zero words
+  const METER_FLOOR_DB = -60;
+  const SPEECH_RMS     = 0.005;
+  const SILENT_RMS     = 0.0003;
+  const QUIET_TICKS    = 30;
+  const STT_SILENT_MS  = 6000;
 
   let micOn        = false;
   let micIsTest    = false;
   let micDevice    = '';
-  let meterLevel   = 0;            // smoothed 0..1 bar position
-  let meterPeak    = 0;            // decaying peak marker
+  let meterLevel   = 0;
+  let meterPeak    = 0;
   let quietTicks   = 0;
-  let quietMaxRms  = 0;            // loudest thing heard during the quiet run
-  let gateDb       = -45;          // sensitivity threshold, dBFS
+  let quietMaxRms  = 0;
+  let gateDb       = -45;
   let gateOpen     = false;
   let draggingGate = false;
 
-  /** Linear RMS → 0..1 bar position on a dB scale (matches how loudness reads). */
   function levelToBar(v) {
     if (!(v > 0.00001)) return 0;
     const db = 20 * Math.log10(v);
     return Math.max(0, Math.min(1, (db - METER_FLOOR_DB) / -METER_FLOOR_DB));
   }
 
-  /** dBFS → 0..1 position on the same scale the bar uses. */
   function dbToBar(db) {
     return Math.max(0, Math.min(1, (db - METER_FLOOR_DB) / -METER_FLOOR_DB));
   }
@@ -312,7 +284,6 @@
 
   function onMicLevel(msg) {
     const bar = levelToBar(msg.rms);
-    // Fast attack so speech is visible immediately, slower release so it reads.
     meterLevel = bar > meterLevel ? bar : meterLevel * 0.75 + bar * 0.25;
     meterPeak  = Math.max(meterPeak * 0.9, levelToBar(msg.peak));
     paintMeter();
@@ -328,20 +299,16 @@
                      'Sensitivity: ' + gateDb + ' dBFS — drag the marker to change';
 
     if (msg.stalled) {
-      // FFmpeg is running but handing us nothing at all.
       setMeterState('is-dead', 'No audio from ' + (micDevice || 'mic'));
     } else if (quietTicks > QUIET_TICKS && quietMaxRms < SILENT_RMS) {
       setMeterState('is-quiet', 'No input — check ' + (micDevice || 'your mic'));
     } else if (quietTicks > QUIET_TICKS) {
-      // Signal is there, just far too weak for the recognizer to work with.
       setMeterState('is-quiet', 'Input too low (' + dbOf(quietMaxRms) + ' dB) — raise mic volume');
     } else if (gateOpen && msg.msSinceStt > STT_SILENT_MS) {
-      // The decisive one: audio definitely reached Vosk, Vosk returned nothing.
       setMeterState('is-nostt', 'Audio OK — no words recognized');
     } else if (gateOpen) {
       setMeterState('is-live', micIsTest ? 'Mic test — hearing you' : 'Transcribing…');
     } else if (hearing) {
-      // Loud enough to hear, quiet enough to ignore — background noise.
       setMeterState('is-gated', 'Below sensitivity — ignoring');
     } else {
       setMeterState('is-live', micIsTest ? 'Mic test — say something' : 'Listening…');
@@ -364,7 +331,6 @@
 
   micMeter.addEventListener('click', () => { if (!micOn && !draggingGate) post({ type: 'micTest' }); });
 
-  // Drag the marker along the track to set sensitivity, Discord-style.
   function gateFromPointer(e) {
     const box = micMeterTrack.getBoundingClientRect();
     if (!box.width) return;
@@ -390,12 +356,10 @@
 
   resetMeter();
 
-  // ─── Messages from extension host ──────────────────────────────────────────
   window.addEventListener('message', async (event) => {
     const msg = event.data;
     switch (msg.type) {
 
-      // ── Local Vosk STT control ──────────────────────────────────────────────
       case 'voskModelChunk':
         try {
           if (msg.index === 0) { _modelChunks = []; }
@@ -538,7 +502,6 @@
     }
   });
 
-  // ─── Context card render ──────────────────────────────────────────────────
   function renderContextCard() {
     if (currentTarget === 'claude-code') {
       contextIcon.textContent = '🔒';
@@ -568,7 +531,6 @@
     }
   }
 
-  // ─── Buttons ────────────────────────────────────────────────────────────────
   btnRecord.addEventListener('click', () => {
     if (isPaused) { post({ type: 'resumeRecording' }); return; }
     if (isRecording) { post({ type: 'stopRecording' }); setRecording(false); }
@@ -578,8 +540,6 @@
     if (isPaused) { post({ type: 'resumeRecording' }); }
     else { btnPause.disabled = true; post({ type: 'pauseRecording' }); }
   });
-  // Wipe what's been dictated so far without touching the mic — handy when the
-  // recognizer has picked up background noise mid-session.
   btnClear.addEventListener('click', () => {
     renderTranscript('');
     hideEnhanceReview();
@@ -604,7 +564,6 @@
     post({ type: 'enhancementDecision', action: 'regenerate' });
   });
 
-  // ─── Settings panel ──────────────────────────────────────────────────────────
   function selectCard(el, selected) {
     el.classList.toggle('selected', selected);
     const radio = el.querySelector('input[type="radio"]');
@@ -641,7 +600,6 @@
     closeSettings();
   });
 
-  // ─── Onboarding ──────────────────────────────────────────────────────────────
   let obMode = 'voiceActivated';
   function obShow(screen) {
     [obScreen1, obScreen2].forEach(s => s.classList.add('hidden'));
@@ -676,6 +634,5 @@
     obOverlay.classList.add('hidden');
   });
 
-  // ─── Init ──────────────────────────────────────────────────────────────────
   post({ type: 'ready' });
 })();
