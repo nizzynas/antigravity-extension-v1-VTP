@@ -1,41 +1,10 @@
-/**
- * patches.ts — Patch definitions for the Claude Code → VTP hot-patch.
- *
- * MIRROR of tools/claude-code-patch.js. Keep these two files in sync; the
- * tools/ scripts are the user-facing CLI form, this is the extension-side
- * embedded form. If you change one, change the other.
- *
- * Tested against Claude Code 2.1.126 and 2.1.138 (anthropic.claude-code).
- * Anchors capture the minified variable names (which change between releases)
- * so the replacements stay version-resilient.
- */
-
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
-// ─── Schema version ─────────────────────────────────────────────────────────
-// Bump whenever the patch shape changes. Old markers with a different schema
-// version trigger an auto-restore + re-apply on activation.
-//   v1 — original PoC (no targetTitle filtering)
-//   v2 — targetTitle strict equality filter for per-conversation lock
-//   v3 — case-insensitive partial title match (failed: webview document.title is empty)
-//   v4 — extension-side filtering via panel.title (each comm tagged with __vtp_panel)
-//   v5 — strip trailing "…" / "..." (tab.label is truncated; panel.title isn't)
-//   v6 — expose getPanelTitlesVTP so the lock picker uses full panel.title
-//   v7 — anchors capture minified var names (V/I4/D/he1 → z/E0/q/ve1 in 2.1.138)
-//        and panelTag now reads the actual panel var instead of hard-coding "V",
-//        which silently set __vtp_panel to a stale ref after the 2.1.138 rename
 export const PATCH_SCHEMA_VERSION = 9;
 
-// ─── Extension discovery ─────────────────────────────────────────────────────
-
-/**
- * Extension roots to scan, in preference order. Antigravity IDE (the current
- * build) uses ~/.antigravity-ide; ~/.antigravity is the legacy folder and often
- * still holds a stale, unloaded copy — patching that one silently does nothing.
- */
 export const EXT_ROOTS: string[] = [
   path.join(os.homedir(), '.antigravity-ide', 'extensions'),
   path.join(os.homedir(), '.antigravity', 'extensions'),
@@ -45,7 +14,6 @@ export const EXT_ROOTS: string[] = [
   path.join(os.homedir(), '.windsurf', 'extensions'),
 ];
 
-/** Numeric version tuple from a dir name like `anthropic.claude-code-2.1.219-win32-x64`. */
 function dirVersion(name: string): number[] {
   const m = /^anthropic\.claude-code-(\d+(?:\.\d+)*)/i.exec(name);
   if (!m) return [0];
@@ -60,7 +28,6 @@ function compareVersions(a: number[], b: number[]): number {
   return 0;
 }
 
-/** Dir names VS Code has marked dead in `<root>/.obsolete` — never loaded again. */
 function obsoleteNames(root: string): Set<string> {
   try {
     const raw = fs.readFileSync(path.join(root, '.obsolete'), 'utf-8');
@@ -71,13 +38,6 @@ function obsoleteNames(root: string): Set<string> {
   }
 }
 
-/**
- * Locate the Claude Code extension dir the host IDE would actually load.
- *
- * Scans every known root (not just the first that has a match), drops versions
- * listed in `.obsolete`, and picks the highest version numerically — plain lex
- * sort ranks 2.1.9 above 2.1.219.
- */
 export function findClaudeCodeExtDir(): string | null {
   if (process.env.CLAUDE_CODE_EXT_DIR && fs.existsSync(process.env.CLAUDE_CODE_EXT_DIR)) {
     return process.env.CLAUDE_CODE_EXT_DIR;
@@ -95,7 +55,6 @@ export function findClaudeCodeExtDir(): string | null {
       const dir = path.join(root, name);
       try {
         if (!fs.statSync(dir).isDirectory()) continue;
-        // A real, loadable install — guards against leftover partial unzips.
         if (!fs.existsSync(path.join(dir, 'extension.js'))) continue;
       } catch { continue; }
       candidates.push({ dir, version: dirVersion(name), rootRank });
@@ -128,9 +87,6 @@ export function extensionFiles(extDir: string): ExtensionFiles {
 export function sha256(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex');
 }
-
-// ─── Webview runtime helper (prepended to webview/index.js) ──────────────────
-// MUST match tools/claude-code-patch.js byte-for-byte.
 
 export const VTP_RUNTIME_HELPER = `
 (function(){
@@ -418,13 +374,10 @@ export const VTP_RUNTIME_HELPER = `
 })();
 `;
 
-// ─── Patch definitions ───────────────────────────────────────────────────────
-
 interface RegexPatch {
   file: 'extJs' | 'wvJs';
   anchor: RegExp;
   appliedMarker: RegExp;
-  /** Build the replacement given the matched anchor text + any regex capture groups. */
   replacement: (matchedAnchor: string, ...captures: string[]) => string;
 }
 
@@ -436,22 +389,15 @@ export const PATCHES: Record<string, Patch> = {
   extJs_innerComm: {
     file: 'extJs',
     anchor: /notifyToggleDictation\(\)\{this\.send\(\{type:"request",channelId:"",requestId:"",request:\{type:"toggle_dictation"\}\}\)\}/,
-    // Marker is specific to v2 (with targetTitle) so re-applying upgrades the patch.
     appliedMarker: /notifyVTPInject\(text,submit,targetTitle\)/,
     replacement: (m) =>
       m
       + 'notifyVTPInject(text,submit,targetTitle){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_inject_prompt",text:text,submit:submit!==!1,targetTitle:targetTitle||""}})}'
       + 'notifyVTPSubmit(targetTitle){this.send({type:"request",channelId:"",requestId:"",request:{type:"vtp_submit_only",targetTitle:targetTitle||""}})}',
   },
-  // Loop var name varies by minifier (V in 2.1.126, z in 2.1.138) — match either.
-  // The replacement's own loop var stays "V" since it's scoped inside the new method.
   extJs_manager: {
     file: 'extJs',
     anchor: /notifyToggleDictation\(\)\{for\(let (\w+) of this\.allComms\)\1\.notifyToggleDictation\(\)\}/,
-    // v5: filter by V.__vtp_panel.title with trailing-ellipsis stripping
-    // (tab.label gets truncated to "Foo…" but panel.title is the full string,
-    // so naive substring match fails because "…" isn't in the full string).
-    // Also logs candidate panels to aid debugging if no match fires.
     appliedMarker: /__vtpCleanTitle/,
     replacement: (m) =>
       m
@@ -460,22 +406,6 @@ export const PATCHES: Record<string, Patch> = {
       + 'notifyVTPSubmit(targetTitle){for(let V of this.allComms){if(targetTitle){var pt=V.__vtp_panel&&V.__vtp_panel.title;if(!pt)continue;var pl=this.__vtpCleanTitle(pt),tl=this.__vtpCleanTitle(targetTitle);if(pl!==tl&&pl.indexOf(tl)===-1&&tl.indexOf(pl)===-1)continue;}V.notifyVTPSubmit(targetTitle)}}',
   },
 
-  // Patch (new in v4): tag each comm with its panel reference at the three
-  // allComms.add(...) call sites so the manager can filter by panel.title.
-  // Each site uses a different comm var name (O/H/O in 2.1.138; N/Z/N in 2.1.126)
-  // and the panel param renamed from V → z in 2.1.138 — so we capture BOTH and
-  // reach forward to "<panelVar>.webview.onDidReceiveMessage" to identify the
-  // panel var unambiguously. Previously the panel name was hard-coded "V", which
-  // silently broke when 2.1.138 renamed the parameter.
-  // The /g flag patches all three occurrences in one pass.
-  // Two shapes, because where the panel is named moved. Up to 2.1.138 a
-  // `.webview.onDidReceiveMessage` followed the add() and named it; in 2.1.232
-  // an object literal follows instead and names it in `isVisible:()=>e.visible`.
-  // Matching only the first shape is what broke on the 2.1.232 update, and it
-  // broke quietly — the other six anchors still matched, so the patch reported
-  // success while the one thing that lets you aim at a conversation was gone.
-  // Both alternatives live in one anchor so this stays a single patch that
-  // either applies or does not, rather than two that half-apply.
   extJs_panelTag: {
     file: 'extJs',
     anchor: /this\.allComms\.add\((\w+)\)(?:(,\1\.onClientInit=\(\)=>this\.broadcastSessionStates\(\);let \w+=\{isVisible:\(\)=>(\w+)\.visible)|((?:,this\.broadcastSessionStates\(\))?,(\w+)\.webview\.onDidReceiveMessage))/g,
@@ -486,8 +416,6 @@ export const PATCHES: Record<string, Patch> = {
       return `${commVar}.__vtp_panel=${panel},this.allComms.add(${commVar})${tail}`;
     },
   },
-  // Captures three minified identifiers — subscriptions ctx, vscode-ns, manager —
-  // which differ between releases (V/I4/D in 2.1.126, z/E0/q in 2.1.138).
   extJs_commands: {
     file: 'extJs',
     anchor: /(\w+)\.subscriptions\.push\((\w+)\.commands\.registerCommand\("claude-vscode\.toggleDictation",\(\)=>\{(\w+)\.notifyToggleDictation\(\)\}\)\);/,
@@ -506,31 +434,15 @@ export const PATCHES: Record<string, Patch> = {
       +   'try{return [...' + mgr + '.allComms].map(function(c){return c.__vtp_panel&&c.__vtp_panel.title||""}).filter(Boolean)}catch(e){return []}'
       + '}));',
   },
-  // The message variable is read from the file rather than assumed.
-  //
-  // It was hard-coded as `$`, which is what 2.1.126 called it. 2.1.233 calls
-  // it `e`, so the inserted case read `$.request.targetTitle`, threw a
-  // ReferenceError into its own try/catch, and did nothing — with the patch
-  // reporting applied, the command dispatching, and the file containing
-  // exactly the code we meant to put there. Nothing anywhere said it was
-  // broken; the only symptom was that text never appeared.
-  //
-  // The name is captured from a neighbouring case in the same switch. The
-  // character class allows `$` and `_`: minifiers use both, and `\w` matching
-  // neither is why the old build looked like it had no anchor at all.
   wvJs_handler: {
     file: 'wvJs',
     anchor: /([\w$]+)\.request\.[\s\S]{0,600}?case"toggle_dictation":this\.toggleDictationSignal\.emit\(\);break;/,
-    // v5: webview filter stays permissive (real filter is extension-side).
-    // If Claude ever populates document.title, the strip helper compares the
-    // truncated form vs the full form correctly.
     appliedMarker: /vtpStripMatch/,
     replacement: (m, msg) =>
       m
       + 'case"vtp_inject_prompt":try{var _t=' + msg + '.request.targetTitle||"";var _dt=document.title||"";console.log("[VTP] inject req — title=",_dt,"lock=",_t);var vtpStripMatch=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch(_dt,_t))break;window.__vtp_inject(' + msg + '.request.text,' + msg + '.request.submit)}catch(e){console.error("[VTP]",e)}break;'
       + 'case"vtp_submit_only":try{var _t2=' + msg + '.request.targetTitle||"";var _dt2=document.title||"";var vtpStripMatch2=function(d,t){if(!t||!d)return true;d=(d||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();t=(t||"").toLowerCase().replace(/[\\u2026.]+\\s*$/,"").trim();return d===t||d.indexOf(t)!==-1||t.indexOf(d)!==-1};if(!vtpStripMatch2(_dt2,_t2)){console.log("[VTP] skip submit",_dt2,_t2);break}window.__vtp_submit()}catch(e){console.error("[VTP]",e)}break;',
   },
-  // Identifier varies (he1 in 2.1.126, ve1 in 2.1.138); match any.
   wvJs_helper: {
     file: 'wvJs',
     anchor: /^var \w+=Object\.create;/,
@@ -540,18 +452,11 @@ export const PATCHES: Record<string, Patch> = {
   pkgJson_cmds: { json: true },
 };
 
-// ─── Patch status / apply helpers ────────────────────────────────────────────
-
 export type PatchStatus = 'applied' | 'unapplied' | 'broken';
 
 export function patchStatus(content: string, patch: Patch): PatchStatus {
-  if ((patch as JsonPatch).json) return 'applied'; // json handled separately
+  if ((patch as JsonPatch).json) return 'applied';
   const rx = patch as RegexPatch;
-  // Asked afresh each time. A /g regex remembers where it stopped, so calling
-  // .test() on the same object twice answers about the rest of the file rather
-  // than the file — and the second answer is usually "no". One anchor here is
-  // /g, and the check runs more than once per session now that health reports
-  // it, so a patch that was fine would read as broken every other look.
   if (matches(rx.appliedMarker, content)) return 'applied';
   if (matches(rx.anchor, content)) return 'unapplied';
   return 'broken';
@@ -580,9 +485,6 @@ export function applyPatches(files: ExtensionFiles): {
     const status = patchStatus(content, rx);
     if (status === 'applied') { results.push({ name, status: 'already-applied' }); continue; }
     if (status === 'broken')  { results.push({ name, status: 'anchor-not-found' }); continue; }
-    // Forward any capture groups from the regex to the replacement function so
-    // patches that need to know the matched comm var name (etc.) can use them.
-    // String.replace passes (match, p1, p2, …, offset, source) to the callback.
     const updated = content.replace(rx.anchor, function (matched: string, ...args: any[]) {
       const captures = args.slice(0, -2) as string[];
       return rx.replacement(matched, ...captures);
