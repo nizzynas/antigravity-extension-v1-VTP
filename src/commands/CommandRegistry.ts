@@ -3,17 +3,12 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { CustomCommand } from '../types';
 
-/**
- * Loads and provides access to user-defined voice commands from commands.json.
- * The file lives at the workspace root and is hot-reloaded on change.
- */
 export class CommandRegistry {
   private commands: CustomCommand[] = [];
   private watcher: vscode.FileSystemWatcher | null = null;
 
   constructor(private readonly workspaceRoot: string | null) {}
 
-  /** Load commands and set up a file watcher for hot-reload */
   initialize(): void {
     this.load();
 

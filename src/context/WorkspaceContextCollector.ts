@@ -9,10 +9,6 @@ const MAX_EDITOR_CHARS = 3_000;
 const MAX_DIFF_CHARS = 3_000;
 const MAX_OPEN_EDITORS = 5;
 
-/**
- * Collects workspace context to inject into Gemini prompts.
- * Includes: active file, open editors, git diff, and package.json metadata.
- */
 export class WorkspaceContextCollector {
   async collect(): Promise<WorkspaceContext> {
     const [activeFile, openEditors, gitDiff, projectMeta] = await Promise.all([

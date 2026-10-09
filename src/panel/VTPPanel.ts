@@ -43,15 +43,6 @@ import {
 
 type WakeMode = 'idle' | 'paused';
 
-/**
- * VTPPanel — orchestrates the fully-local voice→prompt pipeline.
- *
- * Speech-to-text runs in the WEBVIEW via Vosk (WASM). The host tells the webview
- * when to capture (micStart/micStop) and receives transcripts back
- * (voskPartial / voskResult). Everything downstream — trigger detection, intent,
- * cleanup, optional Ollama enhancement, injection — runs here in the host. No
- * FFmpeg, no cloud STT, no API key.
- */
 export class VTPPanel implements vscode.WebviewViewProvider {
   public static readonly viewId = 'vtp.panel';
 
@@ -77,7 +68,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly REFRESH_DEBOUNCE_MS = 2_000;
 
-  // ── Capture / STT state ────────────────────────────────────────────────────
   private readonly mic = new MicCapture();
   private _voskReady = false;
   private _ffmpegReady = false;
@@ -87,9 +77,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private _wakeActive = false;
   private _wakeMode: WakeMode | null = null;
 
-  // ── Input meter ────────────────────────────────────────────────────────────
-  // Levels are measured on the same PCM we hand to Vosk, so a moving bar proves
-  // audio reached the recognizer — if words still don't appear, it's STT's fault.
   private static readonly METER_MS = 100;
   private static readonly METER_STALL_MS = 1_500;
   private _meterTimer: ReturnType<typeof setInterval> | null = null;
@@ -100,11 +87,8 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   private _lastSttAt = 0;
   private _micTestTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // ── Input gate ─────────────────────────────────────────────────────────────
-  // Below the sensitivity threshold nothing reaches Vosk, so background audio
-  // (game sound, a TV, speaker bleed into the mic) never becomes prompt text.
-  private static readonly GATE_HOLD_MS = 900;      // stay open after level drops
-  private static readonly GATE_PREROLL_BYTES = 16_000; // ~0.5s of lead-in kept
+  private static readonly GATE_HOLD_MS = 900;
+  private static readonly GATE_PREROLL_BYTES = 16_000;
   private _gateOpenUntil = 0;
   private _gateWasOpen = false;
   private _preroll: Buffer[] = [];
@@ -148,7 +132,7 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       enableScripts: true,
       localResourceRoots: [
         vscode.Uri.joinPath(this.extensionUri, 'media'),
-        this.modelManager.storageUri, // so the webview can fetch the downloaded model
+        this.modelManager.storageUri,
       ],
     };
     webviewView.webview.html = this.buildHtml(webviewView.webview);
@@ -156,8 +140,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.startContextWatchers();
     webviewView.onDidDispose(() => this.stopContextWatchers());
   }
-
-  // ── Message handler ─────────────────────────────────────────────────────────
 
   private async handleMessage(msg: PanelMessage): Promise<void> {
     if (msg.type !== 'log' && msg.type !== 'voskPartial') {
@@ -219,13 +201,11 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         this.log.appendLine(`[VTP] Input sensitivity set to ${db} dBFS.`);
         break;
       }
-      // ── Vosk STT events from the webview ────────────────────────────────────
       case 'voskReady': this.onVoskReady(); break;
       case 'voskError': this.onVoskError(msg.message); break;
       case 'voskPartial':
         if (msg.text?.trim()) {
           this._lastSttAt = Date.now();
-          // Log only when it changes — partials repeat many times per second.
           if (msg.text !== this._lastPartialLogged) {
             this._lastPartialLogged = msg.text;
             this.log.appendLine(`[VTP] Partial: "${msg.text}"`);
@@ -243,8 +223,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
   }
 
-  // ── Panel init ──────────────────────────────────────────────────────────────
-
   private async onPanelReady(): Promise<void> {
     this.log.appendLine('[VTP] Panel ready — booting local STT.');
     const config = vscode.workspace.getConfiguration('vtp');
@@ -254,7 +232,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
     await this.checkFFmpeg();
 
-    // Kick off the one-time model download + load in the webview.
     void this.loadVoskModel();
 
     const onboarded = this.globalState.get<boolean>('vtp.onboarded', false);
@@ -272,8 +249,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.send({ type: 'settingsStatus', activationMode, postSendMode, wakePhrase });
   }
 
-  // ── Vosk model loading ────────────────────────────────────────────────────
-
   private async loadVoskModel(): Promise<void> {
     try {
       this.send({ type: 'modelStatus', state: 'downloading', pct: 0 });
@@ -285,11 +260,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         (msg) => this.send({ type: 'modelStatus', state: 'downloading', message: msg }),
       );
       this.send({ type: 'modelStatus', state: 'loading' });
-      // Stream the model to the webview as base64 chunks, reading from disk
-      // incrementally so we never hold the whole (up to ~130 MB) model in the
-      // SHARED extension host — a big buffer here can destabilize other
-      // extensions (e.g. Claude Code). 3 MB chunk = multiple of 3 so each
-      // chunk's base64 is independently decodable in the webview.
       const size = (await fs.promises.stat(this.modelManager.modelPath)).size;
       const CHUNK = 3 * 1024 * 1024;
       const count = Math.ceil(size / CHUNK);
@@ -317,8 +287,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this._voskReady = true;
     this.log.appendLine('[VTP] Vosk model ready — STT online.');
     this.send({ type: 'modelStatus', state: 'ready' });
-    // Mic is captured host-side via FFmpeg (no browser permission needed), so
-    // the always-on wake monitor can be armed immediately.
     const cfg = vscode.workspace.getConfiguration('vtp');
     const onboarded = this.globalState.get<boolean>('vtp.onboarded', false);
     if (onboarded && this._ffmpegReady && !this.isRecording && !this.isPaused &&
@@ -346,8 +314,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
 
   private onVoskError(message: string): void {
     this.log.appendLine(`[VTP] Vosk error: ${message}`);
-    // Reset to a clean idle state BEFORE the error so the panel doesn't get
-    // stuck on "Processing…" (recordingStopped → error ordering matters).
     if (this.isRecording || this._wakeActive) {
       this.isRecording = false;
       this.stopWakeMonitor();
@@ -357,13 +323,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.send({ type: 'error', message });
   }
 
-  // ── Mic control (delegates to the webview) ─────────────────────────────────
-
   private async micStart(): Promise<void> {
     if (this._micOn) return;
     this._cancelMicTest();
     this._micOn = true;
-    // Fresh recognizer for this session, then start piping FFmpeg PCM to it.
     this.send({ type: 'voskStart' });
     this.mic.onPcmData = (pcm) => {
       if (!this._micOn) return;
@@ -389,9 +352,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.send({ type: 'voskStop' });
   }
 
-  // ── Input meter ───────────────────────────────────────────────────────────
-
-  /** Fold one PCM chunk into the current meter window; returns that chunk's RMS. */
   private _measure(pcm: Buffer): number {
     const samples = pcm.length >> 1;
     let sumSq = 0;
@@ -407,12 +367,10 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     return samples ? Math.sqrt(sumSq / samples) : 0;
   }
 
-  /** Linear amplitude → dBFS, rounded, for log lines. */
   private db(v: number): number {
     return v > 0.000001 ? Math.round(20 * Math.log10(v)) : -99;
   }
 
-  /** Configured sensitivity threshold, in dBFS. */
   private get gateDb(): number {
     return vscode.workspace.getConfiguration('vtp').get<number>('inputGateDb', -45);
   }
@@ -421,12 +379,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     return Math.pow(10, this.gateDb / 20);
   }
 
-  /**
-   * Pass a chunk to Vosk only while the gate is open. The gate opens the moment
-   * the level clears the threshold and stays open briefly afterwards, and the
-   * last half-second of held-back audio is flushed ahead of it so the first
-   * syllable isn't clipped.
-   */
   private _gateAndForward(pcm: Buffer, rms: number): void {
     const now = Date.now();
     if (rms >= this.gateRms) this._gateOpenUntil = now + VTPPanel.GATE_HOLD_MS;
@@ -443,8 +395,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
 
     if (this._gateWasOpen) {
-      // Closing: hand Vosk a beat of true silence so it finalizes the utterance
-      // instead of waiting for audio that will never come.
       this._gateWasOpen = false;
       this.send({ type: 'voskPcm', data: Buffer.alloc(16_000).toString('base64') });
     }
@@ -490,8 +440,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         gateOpen,
         gateDb: this.gateDb,
       });
-      // Once every 2s, drop a one-line snapshot into the log. This is what makes
-      // a recorded session diagnosable after the fact.
       if (++this._meterTicks % 20 === 0) {
         this.log.appendLine(
           `[state] rec=${+this.isRecording} paused=${+this.isPaused} ` +
@@ -513,11 +461,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.send({ type: 'micState', on: false, gateDb: this.gateDb });
   }
 
-  /**
-   * Mic-only check: run FFmpeg and drive the meter for a few seconds WITHOUT
-   * Vosk, so the input device can be verified even when the model is still
-   * downloading or has failed to load.
-   */
   private async runMicTest(): Promise<void> {
     if (this._micOn || this._micTestTimer) return;
     if (!this._ffmpegReady) {
@@ -549,8 +492,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.log.appendLine('[VTP] Mic test ended.');
   }
 
-  // ── Wake monitor ──────────────────────────────────────────────────────────
-
   private startWakeMonitor(mode: WakeMode): void {
     if (this.isRecording) return;
     if (!this._voskReady || !this._ffmpegReady) return;
@@ -576,7 +517,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     this.micStop();
   }
 
-  /** Normalize + fuzzy-match a heard phrase against the configured wake phrase. */
   private matchesWakePhrase(heard: string, phrase: string): boolean {
     const normalize = (s: string) =>
       s.toLowerCase().replace(/[^\w\s]/g, '').replace(/-/g, '').replace(/\s{2,}/g, ' ').trim();
@@ -594,8 +534,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     return true;
   }
 
-  // ── Transcript event routing ────────────────────────────────────────────────
-
   private onVoskPartial(text: string): void {
     if (!this.isRecording || this.isPaused || this._awaitingEnhancementDecision) return;
     const interim = (this.interimTranscript + ' ' + text).trim();
@@ -607,7 +545,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    // 1. Enhancement review — voice approve / reject / try-again.
     if (this._awaitingEnhancementDecision) {
       const lc = trimmed.toLowerCase();
       if (ENHANCE_APPROVE.test(lc)) { void this.handleEnhancementDecision('approve'); return; }
@@ -617,7 +554,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       return;
     }
 
-    // 2. Wake monitor (idle → start, paused → resume).
     if (this._wakeActive) {
       const cfg = vscode.workspace.getConfiguration('vtp');
       this.log.appendLine(`[VTP] Wake monitor heard: "${trimmed}"`);
@@ -629,11 +565,9 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         }
         return;
       }
-      // idle
       const phrase = cfg.get<string>('wakePhrase', 'hey antigravity');
       if (this.matchesWakePhrase(trimmed, phrase)) {
         this.log.appendLine('[VTP] Wake phrase matched — starting recording.');
-        // Keep anything the user said AFTER the wake phrase as dictation.
         const tail = this._stripWakePrefix(trimmed, phrase);
         this.stopWakeMonitor();
         void this.startRecording().then(() => {
@@ -643,7 +577,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       return;
     }
 
-    // 3. Active dictation.
     if (this.isRecording) {
       this.interimTranscript = (this.interimTranscript + ' ' + trimmed).trim();
       const display = this.promptBuffer ? this.promptBuffer + ' ' + this.interimTranscript : this.interimTranscript;
@@ -654,7 +587,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private _stripWakePrefix(text: string, phrase: string): string {
-    // Remove everything up to and including the wake phrase, return the rest.
     const words = phrase.toLowerCase().split(/\s+/).filter(Boolean);
     const last = words[words.length - 1];
     const lower = text.toLowerCase();
@@ -662,8 +594,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     if (idx === -1) return '';
     return text.slice(idx + last.length).replace(/^[\s,.!?]+/, '').trim();
   }
-
-  // ── Live trigger detection on each final utterance ──────────────────────────
 
   private _processTranscriptChunk(text: string, sessionGen: number): void {
     if (sessionGen !== this._sessionGen) return;
@@ -726,8 +656,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
   }
 
-  // ── Recording control ───────────────────────────────────────────────────────
-
   private async startRecording(): Promise<void> {
     if (!this._ffmpegReady) {
       await this.checkFFmpeg();
@@ -774,7 +702,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
         await this.onFinalTranscript(finalText);
       }
 
-      // If we ended up idle (no send/enhance in flight) and wake mode is on, listen again.
       if (!this.isRecording && !this.isPaused && !this._awaitingEnhancementDecision && !this._restartAfterSend) {
         const cfg = vscode.workspace.getConfiguration('vtp');
         if (cfg.get<string>('activationMode', 'wake') === 'wake') {
@@ -791,7 +718,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
   }
 
   private _enterPause(): void {
-    // Save whatever is buffered, then drop into the paused wake monitor.
     const saved = this.interimTranscript.replace(/\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
     if (saved) {
       this.promptBuffer += (this.promptBuffer ? ' ' : '') + saved;
@@ -822,7 +748,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Resume from the paused wake monitor. */
   private async _doResume(wakeText: string): Promise<void> {
     if (!this.isPaused) return;
     const hasSendInWake = hasSendTrigger(wakeText);
@@ -839,8 +764,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       void this._postSendFlow();
     }
   }
-
-  // ── Post-send flow ──────────────────────────────────────────────────────────
 
   private async _postSendFlow(): Promise<void> {
     const cfg            = vscode.workspace.getConfiguration('vtp');
@@ -860,8 +783,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.log.appendLine('[VTP] Post-send pause/manual — idle.');
     }
   }
-
-  // ── Onboarding + settings ───────────────────────────────────────────────────
 
   private async handleOnboardingComplete(
     msg: Extract<PanelMessage, { type: 'onboardingComplete' }>,
@@ -883,7 +804,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     postSendMode: 'continuous' | 'pause',
     wakePhrase: string,
   ): Promise<void> {
-    // Reset to idle.
     this.stopWakeMonitor();
     if (this.isRecording) { this.isRecording = false; this.micStop(); this.send({ type: 'recordingStopped' }); }
     if (this.isPaused) { this.isPaused = false; this.send({ type: 'recordingStopped' }); }
@@ -912,8 +832,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     const lockedTitle = cfg.get<string>('claudeCodeLockedTitle', '') || '';
     this.send({ type: 'targetState', target, lockedTitle });
   }
-
-  // ── Context watchers ────────────────────────────────────────────────────────
 
   private startContextWatchers(): void {
     const brainDir = ConversationMatcher.getBrainDir();
@@ -947,8 +865,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     if (this._refreshTimer) { clearTimeout(this._refreshTimer); this._refreshTimer = null; }
   }
 
-  // ── Side commands ───────────────────────────────────────────────────────────
-
   private async handleSideCommand(instruction: string): Promise<void> {
     this.log.appendLine(`[VTP] Side command raw: "${instruction}"`);
     this.send({ type: 'commandFired', description: `🔗 Side cmd: ${instruction}` });
@@ -975,8 +891,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this.log.appendLine(`[VTP] Side command inject error: ${this.formatError(err)}`);
     }
   }
-
-  // ── Cleanup passes ──────────────────────────────────────────────────────────
 
   private ollama(): OllamaClient {
     const model = vscode.workspace.getConfiguration('vtp').get<string>('enhancementModel', 'llama3.2');
@@ -1015,15 +929,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       this._lastCleanedSnapshot = cleaned;
       this.interimTranscript = '';
       this.send({ type: 'transcriptResult', text: this.promptBuffer });
-      // Resume listening after a silent clean.
       const cfg = vscode.workspace.getConfiguration('vtp');
       if (cfg.get<string>('activationMode', 'wake') === 'wake') this.startWakeMonitor('idle');
     } catch (err) {
       this.send({ type: 'error', message: 'Cleanup failed — buffer unchanged.' });
     }
   }
-
-  // ── onFinalTranscript — the heavy decision logic ────────────────────────────
 
   private async onFinalTranscript(segment: string): Promise<void> {
     if (this._awaitingEnhancementDecision) {
@@ -1090,14 +1001,12 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       return;
     }
 
-    // Plain dictation — append verbatim.
     if (!SEND_TRIGGER.test(segment) && !SEND_TRIGGER.test(segmentCleaned) && !ACTION_TRIGGER.test(segment)) {
       this.promptBuffer += (this.promptBuffer ? ' ' : '') + segment;
       this.send({ type: 'transcriptResult', text: this.promptBuffer });
       return;
     }
 
-    // Ambiguous — classify locally.
     this.ensurePipeline();
     const context = this.cachedContext ?? await this.contextCollector.collect();
     try {
@@ -1141,8 +1050,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     }
   }
 
-  // ── Injection ───────────────────────────────────────────────────────────────
-
   private async onSend(prompt: string): Promise<void> {
     const finalPrompt = await this.maybeAutoClean(prompt);
     this.log.appendLine(`[VTP] Manual send — injecting (${finalPrompt.length} chars).`);
@@ -1177,8 +1084,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     return cleaned;
   }
 
-  // ── Enhancement ─────────────────────────────────────────────────────────────
-
   private async elaborateAndShow(): Promise<void> {
     if (!this.promptBuffer.trim()) {
       this.send({ type: 'error', message: 'Nothing to enhance — say something first.' });
@@ -1199,7 +1104,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
     } catch (err) {
       this._awaitingEnhancementDecision = false;
       if (err instanceof NoLocalModelError) {
-        // Graceful local fallback: keep the (regex-cleaned) buffer, tell the user.
         this.send({ type: 'error', message: err.message });
         this.send({ type: 'transcriptResult', text: this.promptBuffer });
       } else {
@@ -1223,8 +1127,6 @@ export class VTPPanel implements vscode.WebviewViewProvider {
       await this.elaborateAndShow();
     }
   }
-
-  // ── Helpers ─────────────────────────────────────────────────────────────────
 
   private formatError(err: unknown): string {
     return err instanceof Error ? err.message : String(err);

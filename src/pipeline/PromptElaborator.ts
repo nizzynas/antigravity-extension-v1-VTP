@@ -1,7 +1,6 @@
 import { WorkspaceContext, MatchedConversation } from '../types';
 import { OllamaClient } from './OllamaClient';
 
-/** Thrown when enhancement is requested but no local LLM is available. */
 export class NoLocalModelError extends Error {
   constructor() {
     super('Enhancement needs a local LLM. Install Ollama (ollama.com) and pull a model, e.g. `ollama pull llama3.2`. Until then VTP will send your cleaned dictation as-is.');
@@ -9,14 +8,6 @@ export class NoLocalModelError extends Error {
   }
 }
 
-/**
- * Takes the accumulated prompt buffer + workspace/conversation context and asks
- * a LOCAL Ollama model to produce a clean, detailed, codebase-aware prompt.
- *
- * Fully local — no API key, nothing leaves the machine. If Ollama is not
- * running (or has no models), elaborate() throws NoLocalModelError and the
- * caller falls back to sending the raw/cleaned buffer.
- */
 export class PromptElaborator {
   private readonly ollama: OllamaClient;
 
